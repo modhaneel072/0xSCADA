@@ -9,6 +9,29 @@
 
 export { eventAnchorBridge, type AnchorableEvent, type AnchorBatch, type EventAnchorConfig } from './event-anchor';
 export { stateSyncBridge, type StateChange, type SyncTarget, type StateSyncConfig } from './state-sync';
+export {
+  getAnchorBackend,
+  anchorsToL2,
+  anchorsToNode,
+  _resetWarningLatch,
+  type AnchorBackend,
+} from './anchor-backend';
+// Operator-facing Anchor-Backend Switch control plane (#455). Lives in a
+// separate module from #443's production bridge and shares its backend union.
+export {
+  anchorSwitch,
+  AnchorSwitch,
+  projectSwitch,
+  backendsFor,
+  parseBackendEnv,
+  DEFAULT_BACKEND_PROFILES,
+  type BackendProfile,
+  type ProjectionInput,
+  type SwitchProjection,
+  type BackendRouting,
+  type RoutableEvent,
+  type DispatchResult,
+} from './anchor-switch';
 
 import { eventAnchorBridge } from './event-anchor';
 import { stateSyncBridge } from './state-sync';

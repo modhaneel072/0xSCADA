@@ -124,12 +124,16 @@ Deploy the automated bounty payment contract:
 
 **Deployment Command:**
 ```bash
-cd contracts
-npx hardhat run scripts/deploy-bounty-payment.ts --network polygon
-
-# Verify on Polygonscan
-npx hardhat verify --network polygon <CONTRACT_ADDRESS>
+forge build
+forge create contracts/BountyPayment.sol:BountyPayment \
+  --rpc-url "$BOUNTY_RPC_URL" \
+  --private-key "$BOUNTY_PRIVATE_KEY" \
+  --broadcast
 ```
+
+Forge is the canonical contract tool for this repository. Record the
+`Deployed to:` address as the `BOUNTY_CONTRACT_ADDRESS` repository secret and
+verify it with the target network's explorer tooling before enabling payouts.
 
 **Save Deployed Addresses:**
 ```bash
@@ -200,10 +204,10 @@ Set up a GitHub bot or GitHub Actions for:
 **Required Secrets:**
 ```bash
 # GitHub Repository Secrets
-BOUNTY_WALLET_PRIVATE_KEY  # For signing transactions
-POLYGON_RPC_URL           # RPC endpoint
+BOUNTY_PRIVATE_KEY        # PAYOUT_ROLE signer
+BOUNTY_RPC_URL            # RPC endpoint
 BOUNTY_CONTRACT_ADDRESS   # Deployed contract address
-GITHUB_BOT_TOKEN          # For GitHub API access
+BOUNTY_NETWORK            # Human-readable network name for confirmations
 ```
 
 ### 4.3 Label Automation

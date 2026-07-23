@@ -13,7 +13,7 @@ import type { Request, Response } from 'express';
 
 type MetricType = 'counter' | 'gauge' | 'histogram' | 'summary';
 
-interface MetricLabels {
+export interface MetricLabels {
   [key: string]: string;
 }
 
@@ -36,7 +36,7 @@ interface HistogramConfig extends MetricConfig {
 /**
  * Counter metric - monotonically increasing value
  */
-class Counter {
+export class Counter {
   private values: Map<string, number> = new Map();
   
   constructor(
@@ -84,7 +84,7 @@ class Counter {
 /**
  * Gauge metric - value that can go up and down
  */
-class Gauge {
+export class Gauge {
   private values: Map<string, number> = new Map();
   
   constructor(
@@ -144,7 +144,7 @@ class Gauge {
 /**
  * Histogram metric - tracks distribution of values
  */
-class Histogram {
+export class Histogram {
   private buckets: Map<string, Map<number, number>> = new Map();
   private sums: Map<string, number> = new Map();
   private counts: Map<string, number> = new Map();

@@ -98,13 +98,15 @@ await bountyPayment.registerBounty(
 ```yaml
 - name: Register claim on smart contract
   run: |
-    npx hardhat run scripts/claim-bounty.ts \
+    npx tsx contracts/scripts/claim-bounty.ts \
       --issue-number ${{ github.event.issue.number }} \
-      --claimant ${{ steps.parse.outputs.wallet }} \
-      --network polygon
+      --claimant ${{ steps.parse.outputs.wallet }}
 ```
 
-**Script**: `scripts/claim-bounty.ts`
+The script reads `RPC_URL`, `BOUNTY_CONTRACT_ADDRESS`, and
+`BOUNTY_PRIVATE_KEY` from the environment.
+
+**Script**: `contracts/scripts/claim-bounty.ts`
 ```typescript
 const tx = await bountyPayment.claimBounty(
   issueNumber,
@@ -146,14 +148,16 @@ This is a public function - anyone can call it to clean up expired claims.
 ```yaml
 - name: Execute payment on smart contract
   run: |
-    npx hardhat run scripts/pay-bounty.ts \
+    npx tsx contracts/scripts/pay-bounty.ts \
       --issue-number ${{ steps.extract.outputs.issue_number }} \
       --pr-number ${{ github.event.pull_request.number }} \
-      --recipient ${{ steps.extract.outputs.wallet }} \
-      --network polygon
+      --recipient ${{ steps.extract.outputs.wallet }}
 ```
 
-**Script**: `scripts/pay-bounty.ts`
+The script uses the same three environment variables as the claim command and
+waits for a successful transaction receipt before the workflow updates GitHub.
+
+**Script**: `contracts/scripts/pay-bounty.ts`
 ```typescript
 const tx = await bountyPayment.payBounty(
   issueNumber,

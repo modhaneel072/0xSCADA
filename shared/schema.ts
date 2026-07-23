@@ -30,8 +30,9 @@ import {
   uniqueIndex,
   primaryKey,
 } from "drizzle-orm/pg-core";
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
+import { z } from "zod"; // #459: safe-state config validation schemas
 
 // ─── Enums ───────────────────────────────────────────────────────────────────
 
@@ -323,6 +324,327 @@ export const certificationApprovals = pgTable("certification_approvals", {
   certIdIdx: index("idx_cert_approvals_cert_id").on(table.certificationId),
 }));
 
+// ─── Blueprint Persistence ──────────────────────────────────────────────────
+
+export const vendors = pgTable("vendors", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 100 }).notNull(),
+  displayName: varchar("display_name", { length: 255 }).notNull(),
+  description: text("description"),
+  platforms: jsonb("platforms").notNull().default(sql`'[]'::jsonb`),
+  languages: jsonb("languages").notNull().default(sql`'[]'::jsonb`),
+  configSchema: jsonb("config_schema").notNull().default(sql`'{}'::jsonb`),
+  isActive: boolean("is_active").default(true).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  nameIdx: uniqueIndex("idx_vendors_name").on(table.name),
+}));
+
+export const templatePackages = pgTable("template_packages", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  version: varchar("version", { length: 50 }).default("1.0.0").notNull(),
+  description: text("description"),
+  templateType: varchar("template_type", { length: 100 }).notNull(),
+  language: varchar("language", { length: 50 }).notNull(),
+  templateContent: text("template_content").notNull(),
+  placeholders: jsonb("placeholders").notNull().default(sql`'[]'::jsonb`),
+  requiredInputs: jsonb("required_inputs").notNull().default(sql`'[]'::jsonb`),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const controlModuleTypes = pgTable("control_module_types", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  vendorId: uuid("vendor_id").references(() => vendors.id),
+  version: varchar("version", { length: 50 }).default("1.0.0").notNull(),
+  description: text("description"),
+  inputs: jsonb("inputs").notNull().default(sql`'[]'::jsonb`),
+  outputs: jsonb("outputs").notNull().default(sql`'[]'::jsonb`),
+  inOuts: jsonb("in_outs").notNull().default(sql`'[]'::jsonb`),
+  dataTypeMappings: jsonb("data_type_mappings").notNull().default(sql`'{}'::jsonb`),
+  templatePackageId: uuid("template_package_id").references(() => templatePackages.id),
+  sourcePackage: text("source_package"),
+  classification: varchar("classification", { length: 100 }).default("control_module"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  nameIdx: uniqueIndex("idx_control_module_types_name").on(table.name),
+}));
+
+export const controlModuleInstances = pgTable("control_module_instances", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  instanceNumber: integer("instance_number"),
+  controlModuleTypeId: uuid("control_module_type_id").notNull().references(() => controlModuleTypes.id),
+  controllerId: varchar("controller_id", { length: 255 }),
+  unitInstanceId: uuid("unit_instance_id"),
+  pidDrawing: text("pid_drawing"),
+  comment: text("comment"),
+  configuration: jsonb("configuration").notNull().default(sql`'{}'::jsonb`),
+  currentState: jsonb("current_state").notNull().default(sql`'{}'::jsonb`),
+  siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
+  assetId: varchar("asset_id", { length: 64 }).references(() => assets.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const unitTypes = pgTable("unit_types", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  vendorId: uuid("vendor_id").references(() => vendors.id),
+  version: varchar("version", { length: 50 }).default("1.0.0").notNull(),
+  description: text("description"),
+  variables: jsonb("variables").notNull().default(sql`'[]'::jsonb`),
+  equipmentModules: jsonb("equipment_modules").notNull().default(sql`'[]'::jsonb`),
+  templatePackageId: uuid("template_package_id").references(() => templatePackages.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  nameIdx: uniqueIndex("idx_unit_types_name").on(table.name),
+}));
+
+export const unitInstances = pgTable("unit_instances", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  instanceNumber: integer("instance_number"),
+  unitTypeId: uuid("unit_type_id").notNull().references(() => unitTypes.id),
+  controllerId: varchar("controller_id", { length: 255 }),
+  pidDrawing: text("pid_drawing"),
+  processCell: text("process_cell"),
+  area: text("area"),
+  comment: text("comment"),
+  siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const phaseTypes = pgTable("phase_types", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  vendorId: uuid("vendor_id").references(() => vendors.id),
+  version: varchar("version", { length: 50 }).default("1.0.0").notNull(),
+  description: text("description"),
+  linkedModules: jsonb("linked_modules").notNull().default(sql`'[]'::jsonb`),
+  inputs: jsonb("inputs").notNull().default(sql`'[]'::jsonb`),
+  outputs: jsonb("outputs").notNull().default(sql`'[]'::jsonb`),
+  inOuts: jsonb("in_outs").notNull().default(sql`'[]'::jsonb`),
+  internalValues: jsonb("internal_values").notNull().default(sql`'[]'::jsonb`),
+  hmiParameters: jsonb("hmi_parameters").notNull().default(sql`'[]'::jsonb`),
+  recipeParameters: jsonb("recipe_parameters").notNull().default(sql`'[]'::jsonb`),
+  reportParameters: jsonb("report_parameters").notNull().default(sql`'[]'::jsonb`),
+  sequences: jsonb("sequences").notNull().default(sql`'{}'::jsonb`),
+  templatePackageId: uuid("template_package_id").references(() => templatePackages.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  nameIdx: uniqueIndex("idx_phase_types_name").on(table.name),
+}));
+
+export const phaseInstances = pgTable("phase_instances", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  instanceNumber: integer("instance_number"),
+  phaseTypeId: uuid("phase_type_id").notNull().references(() => phaseTypes.id),
+  unitInstanceId: uuid("unit_instance_id").references(() => unitInstances.id),
+  controllerId: varchar("controller_id", { length: 255 }),
+  currentState: varchar("current_state", { length: 100 }).default("IDLE"),
+  currentStep: integer("current_step").default(0),
+  linkedModuleInstances: jsonb("linked_module_instances").notNull().default(sql`'{}'::jsonb`),
+  siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const designSpecifications = pgTable("design_specifications", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  version: varchar("version", { length: 50 }).notNull(),
+  description: text("description"),
+  contentHash: varchar("content_hash", { length: 255 }).notNull(),
+  txHash: varchar("tx_hash", { length: 255 }),
+  content: jsonb("content").notNull().default(sql`'{}'::jsonb`),
+  siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  anchoredAt: timestamp("anchored_at", { withTimezone: true }),
+});
+
+export const generatedCode = pgTable("generated_code", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  sourceType: varchar("source_type", { length: 100 }).notNull(),
+  sourceId: varchar("source_id", { length: 255 }).notNull(),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  templatePackageId: uuid("template_package_id").references(() => templatePackages.id),
+  language: varchar("language", { length: 50 }).notNull(),
+  code: text("code").notNull(),
+  codeHash: varchar("code_hash", { length: 255 }).notNull(),
+  txHash: varchar("tx_hash", { length: 255 }),
+  metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  status: varchar("status", { length: 50 }).default("draft").notNull(),
+  generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
+  approvedAt: timestamp("approved_at", { withTimezone: true }),
+  approvedBy: varchar("approved_by", { length: 255 }),
+});
+
+export const dataTypeMappings = pgTable("data_type_mappings", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  canonicalType: varchar("canonical_type", { length: 100 }).notNull(),
+  vendorType: varchar("vendor_type", { length: 100 }).notNull(),
+  size: integer("size"),
+  precision: integer("precision"),
+  metadata: jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  vendorTypeIdx: uniqueIndex("idx_data_type_mappings_vendor_canonical").on(
+    table.vendorId,
+    table.canonicalType,
+  ),
+}));
+
+export const controllers = pgTable("controllers", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  vendorId: uuid("vendor_id").notNull().references(() => vendors.id),
+  siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
+  model: varchar("model", { length: 255 }).notNull(),
+  firmwareVersion: varchar("firmware_version", { length: 100 }),
+  address: varchar("address", { length: 255 }),
+  configuration: jsonb("configuration").notNull().default(sql`'{}'::jsonb`),
+  status: varchar("status", { length: 50 }).default("offline").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// ─── Blueprint Safe-State (#459) ─────────────────────────────────────────────
+// Watchdog & Safe-State Fallback. A blueprint's control tick has a per-tick
+// budget; if it is exceeded for N consecutive ticks the watchdog halts the
+// blueprint and applies a pre-declared safe state, anchoring a CRITICAL
+// `SafeStateEntered` event. Re-entry to RUNNING requires explicit operator
+// action. These additions are append-only to avoid cross-issue merge conflicts.
+
+/**
+ * Pre-declared safe state a blueprint falls back to on a watchdog trip.
+ *  - `hold-last`  : freeze all outputs at their last commanded value.
+ *  - `force-zero` : drive all outputs to zero / de-energised.
+ *  - { recipe }   : load a named, previously-validated safe recipe.
+ */
+export const safeStateActionSchema = z.union([
+  z.literal("hold-last"),
+  z.literal("force-zero"),
+  z.object({ recipe: z.string().min(1) }),
+]);
+export type SafeStateAction = z.infer<typeof safeStateActionSchema>;
+
+/** Per-blueprint watchdog / safe-state configuration. */
+export const safeStateConfigSchema = z.object({
+  /** Whether the watchdog is armed for this blueprint. */
+  enabled: z.boolean().default(true),
+  /** Per-tick wall-clock budget in milliseconds. */
+  tickBudgetMs: z.number().int().positive(),
+  /** Consecutive over-budget ticks tolerated before the safe state is applied. */
+  consecutiveMissesBeforeSafeState: z.number().int().positive(),
+  /** The pre-declared safe state to apply on a trip. */
+  safeState: safeStateActionSchema,
+});
+export type SafeStateConfig = z.infer<typeof safeStateConfigSchema>;
+
+// Persisted record of every safe-state entry / exit transition (audit trail).
+export const blueprintSafeStateLog = pgTable("blueprint_safe_state_log", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  blueprintId: varchar("blueprint_id", { length: 64 }).notNull(),
+  siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
+  // "ENTERED" when the watchdog trips, "EXITED" when an operator resumes.
+  transition: varchar("transition", { length: 16 }).notNull(),
+  // Serialized SafeStateAction that was applied.
+  safeState: jsonb("safe_state").notNull(),
+  tickBudgetMs: integer("tick_budget_ms").notNull(),
+  consecutiveMisses: integer("consecutive_misses"),
+  // Operator who acknowledged / resumed (null for an automatic ENTERED event).
+  operator: varchar("operator", { length: 255 }),
+  reason: text("reason"),
+  // Hash anchored to the canonical anchor backend for this transition.
+  anchorHash: varchar("anchor_hash", { length: 255 }),
+  anchorTxHash: varchar("anchor_tx_hash", { length: 255 }),
+  metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  blueprintIdIdx: index("idx_safe_state_log_blueprint_id").on(table.blueprintId),
+  transitionIdx: index("idx_safe_state_log_transition").on(table.transition),
+  createdAtIdx: index("idx_safe_state_log_created_at").on(table.createdAt),
+}));
+
+export type BlueprintSafeStateLog = typeof blueprintSafeStateLog.$inferSelect;
+export type InsertBlueprintSafeStateLog = typeof blueprintSafeStateLog.$inferInsert;
+
+// ─── Modbus Register Map (Issue #462: Modbus TCP Server Mode) ────────────────
+//
+// Per-site mapping of 0xSCADA tags to Modbus addresses so standard Modbus
+// masters can poll 0xSCADA. One row per (site, area, address). `area` is one of
+// coil | discreteInput | holdingRegister | inputRegister; `dataType` is one of
+// bool | uint16 | int16 | uint32 | int32 | float32 (see
+// server/protocols/modbus-server/register-map.ts for the runtime schema/codec).
+
+export const modbusRegisterMap = pgTable("modbus_register_map", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  siteId: varchar("site_id", { length: 64 }).notNull().references(() => sites.id, { onDelete: "cascade" }),
+  unitId: integer("unit_id").default(1).notNull(),
+  area: varchar("area", { length: 32 }).notNull(),
+  address: integer("address").notNull(),
+  tagId: varchar("tag_id", { length: 255 }).notNull(),
+  dataType: varchar("data_type", { length: 16 }).notNull(),
+  scale: real("scale"),
+  wordOrder: varchar("word_order", { length: 8 }),
+  readOnly: boolean("read_only").default(false).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  siteAreaAddressIdx: uniqueIndex("idx_modbus_register_map_site_area_address").on(table.siteId, table.unitId, table.area, table.address),
+  siteIdIdx: index("idx_modbus_register_map_site_id").on(table.siteId),
+}));
+
+// ─── Validator Nodes & Pubkeys (#454: Cross-Node State Queries) ───────────────
+// Additive — these tables back the per-validator /state/:key proxy so the server
+// can resolve a validator's RPC endpoint and verify its signed responses against
+// a registered public key before returning them to the operator.
+
+export const validatorNodes = pgTable("validator_nodes", {
+  // Human/operator-facing node id used in the URL (e.g. "validator-2").
+  id: varchar("id", { length: 64 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  // Base URL of the oxscada RPC endpoint, e.g. "http://10.0.0.12:8645".
+  rpcUrl: varchar("rpc_url", { length: 512 }).notNull(),
+  // Owning operator — used as the rate-limit bucket key.
+  operatorId: varchar("operator_id", { length: 255 }),
+  region: varchar("region", { length: 64 }),
+  enabled: boolean("enabled").default(true).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (table) => ({
+  operatorIdIdx: index("idx_validator_nodes_operator_id").on(table.operatorId),
+  enabledIdx: index("idx_validator_nodes_enabled").on(table.enabled),
+}));
+
+export const validatorPubkeys = pgTable("validator_pubkeys", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  nodeId: varchar("node_id", { length: 64 }).notNull().references(() => validatorNodes.id, { onDelete: "cascade" }),
+  // Signature scheme of the registered key. Default is ed25519 (node:crypto).
+  algorithm: varchar("algorithm", { length: 32 }).default("ed25519").notNull(),
+  // PEM-encoded SPKI public key (one row per active/rotated key).
+  publicKeyPem: text("public_key_pem").notNull(),
+  // Optional short fingerprint to identify the key the validator signed with.
+  keyId: varchar("key_id", { length: 128 }),
+  active: boolean("active").default(true).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  retiredAt: timestamp("retired_at", { withTimezone: true }),
+}, (table) => ({
+  nodeIdIdx: index("idx_validator_pubkeys_node_id").on(table.nodeId),
+  nodeActiveIdx: index("idx_validator_pubkeys_node_active").on(table.nodeId, table.active),
+}));
+
 // ─── Schema Exports ──────────────────────────────────────────────────────────
 
 // Insert schemas for validation
@@ -330,6 +652,21 @@ export const insertSiteSchema = createInsertSchema(sites);
 export const insertAssetSchema = createInsertSchema(assets);
 export const insertEventAnchorSchema = createInsertSchema(eventAnchors);
 export const insertMaintenanceRecordSchema = createInsertSchema(maintenanceRecords);
+export const insertVendorSchema = createInsertSchema(vendors);
+export const insertTemplatePackageSchema = createInsertSchema(templatePackages);
+export const insertControlModuleTypeSchema = createInsertSchema(controlModuleTypes);
+export const insertControlModuleInstanceSchema = createInsertSchema(controlModuleInstances);
+export const insertUnitTypeSchema = createInsertSchema(unitTypes);
+export const insertUnitInstanceSchema = createInsertSchema(unitInstances);
+export const insertPhaseTypeSchema = createInsertSchema(phaseTypes);
+export const insertPhaseInstanceSchema = createInsertSchema(phaseInstances);
+export const insertDesignSpecificationSchema = createInsertSchema(designSpecifications);
+export const insertGeneratedCodeSchema = createInsertSchema(generatedCode);
+export const insertDataTypeMappingSchema = createInsertSchema(dataTypeMappings);
+export const insertControllerSchema = createInsertSchema(controllers);
+export const insertModbusRegisterMapSchema = createInsertSchema(modbusRegisterMap);
+export const insertValidatorNodeSchema = createInsertSchema(validatorNodes);
+export const insertValidatorPubkeySchema = createInsertSchema(validatorPubkeys);
 
 // Type exports
 export type Site = typeof sites.$inferSelect;
@@ -339,3 +676,34 @@ export type MaintenanceRecord = typeof maintenanceRecords.$inferSelect;
 export type InsertSite = typeof sites.$inferInsert;
 export type InsertAsset = typeof assets.$inferInsert;
 export type InsertEventAnchor = typeof eventAnchors.$inferInsert;
+export type InsertMaintenanceRecord = typeof maintenanceRecords.$inferInsert;
+export type Vendor = typeof vendors.$inferSelect;
+export type InsertVendor = typeof vendors.$inferInsert;
+export type TemplatePackage = typeof templatePackages.$inferSelect;
+export type InsertTemplatePackage = typeof templatePackages.$inferInsert;
+export type ControlModuleType = typeof controlModuleTypes.$inferSelect;
+export type InsertControlModuleType = typeof controlModuleTypes.$inferInsert;
+export type ControlModuleInstance = typeof controlModuleInstances.$inferSelect;
+export type InsertControlModuleInstance = typeof controlModuleInstances.$inferInsert;
+export type UnitType = typeof unitTypes.$inferSelect;
+export type InsertUnitType = typeof unitTypes.$inferInsert;
+export type UnitInstance = typeof unitInstances.$inferSelect;
+export type InsertUnitInstance = typeof unitInstances.$inferInsert;
+export type PhaseType = typeof phaseTypes.$inferSelect;
+export type InsertPhaseType = typeof phaseTypes.$inferInsert;
+export type PhaseInstance = typeof phaseInstances.$inferSelect;
+export type InsertPhaseInstance = typeof phaseInstances.$inferInsert;
+export type DesignSpecification = typeof designSpecifications.$inferSelect;
+export type InsertDesignSpecification = typeof designSpecifications.$inferInsert;
+export type GeneratedCode = typeof generatedCode.$inferSelect;
+export type InsertGeneratedCode = typeof generatedCode.$inferInsert;
+export type DataTypeMapping = typeof dataTypeMappings.$inferSelect;
+export type InsertDataTypeMapping = typeof dataTypeMappings.$inferInsert;
+export type Controller = typeof controllers.$inferSelect;
+export type InsertController = typeof controllers.$inferInsert;
+export type ModbusRegisterMapRow = typeof modbusRegisterMap.$inferSelect;
+export type InsertModbusRegisterMapRow = typeof modbusRegisterMap.$inferInsert;
+export type ValidatorNode = typeof validatorNodes.$inferSelect;
+export type ValidatorPubkey = typeof validatorPubkeys.$inferSelect;
+export type InsertValidatorNode = typeof validatorNodes.$inferInsert;
+export type InsertValidatorPubkey = typeof validatorPubkeys.$inferInsert;

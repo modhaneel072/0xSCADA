@@ -174,12 +174,16 @@ Network: Polygon
 ```solidity
 // contracts/BountyPayment.sol
 function payBounty(
-    address recipient,
-    uint256 amount,
     uint256 issueNumber,
-    string memory prUrl
-) external onlyMaintainer returns (bytes32 txHash)
+    uint256 prNumber,
+    address payable recipient
+) external onlyRole(PAYOUT_ROLE)
 ```
+
+GitHub Actions validates the issue label, PR reference, and claimant wallet
+before calling the contract. The contract independently enforces that the
+bounty is claimed, the recipient is the claimant, and the payout signer has
+`PAYOUT_ROLE`.
 
 **Estimated Payout Time:** 24-48 hours after merge
 

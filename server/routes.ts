@@ -4,7 +4,7 @@ import { storage } from "./storage";
 import { blockchainService } from "./blockchain";
 import { logError } from "./logger";
 import { insertSiteSchema, insertEventAnchorSchema, insertMaintenanceRecordSchema } from "@shared/schema";
-import { fromZodError } from "zod-validation-error";
+import { fromZodError } from "zod-validation-error/v4";
 import { agentRoutes } from "./routes/agents";
 import { eventRoutes } from "./routes/events";
 import { batchRoutes } from "./routes/batch";
@@ -18,12 +18,28 @@ import pidRoutes from "./routes/pid";
 import { fluxRoutes } from "./routes/flux";
 import { gatewayRoutes } from "./routes/gateway";
 import { intelligenceRoutes } from "./routes/intelligence";
+import { predictiveRoutes } from "./routes/predictive";
+import { predictiveMaintenanceService } from "./services/predictive";
+import { alarmCorrelationRoutes } from "./routes/alarm-correlation";
+import { alarmCorrelationService } from "./services/alarm-correlation";
+import { twinRoutes } from "./routes/twin";
+import { digitalTwinService } from "./services/twin";
+import { tuningRoutes } from "./routes/tuning";
+import { tuningService } from "./services/tuning";
+import { nlQueryService } from "./services/nlquery";
+import { marketplaceRoutes } from "./routes/marketplace";
+import { marketplaceService } from "./services/marketplace";
 import { governanceRoutes } from "./routes/governance";
 import { securityRoutes } from "./routes/security";
 import { geometryRoutes } from "./routes/geometry";
 import { blueprintRoutes } from "./routes/blueprints";
 import { vendorRoutes } from "./routes/vendors";
 import { codegenRoutes } from "./routes/codegen";
+import { blueprintSafeStateRoutes } from "./routes/blueprint-safe-state"; // #459
+// #454 cross-node state queries + #456 slashing/liveness visualizer history are
+// served by a single combined router mounted at /api/nodes (see routes/nodes.ts).
+import { nodeRoutes } from "./routes/nodes";
+import { adminAnchorRoutes } from "./routes/admin-anchor"; // #455 Anchor-Backend Switch UX
 import { getFluxPublisher } from "./services/flux";
 
 import { tagStreamServer } from "./websocket/tag-stream";
@@ -52,6 +68,11 @@ export async function registerRoutes(
 
   // P1 Wiring: Intelligence, Governance, and Security modules
   app.use("/api/intelligence", intelligenceRoutes);
+  app.use("/api/predictive", predictiveRoutes);  // ADR-0013 [13.1] (#212)
+  app.use("/api/alarm-correlation", alarmCorrelationRoutes);  // ADR-0013 [13.2] (#213)
+  app.use("/api/twin", twinRoutes);  // ADR-0013 [13.3] (#214)
+  app.use("/api/tuning", tuningRoutes);  // ADR-0013 [13.4] (#215)
+  app.use("/api/marketplace", marketplaceRoutes);  // ADR-0013 [13.6] (#217)
   app.use("/api/governance", governanceRoutes);
   app.use("/api/security", securityRoutes);
   app.use("/api/geometry", geometryRoutes(getFluxPublisher()));
@@ -63,6 +84,10 @@ export async function registerRoutes(
   app.use("/api/blueprints", blueprintRoutes);
   app.use("/api", vendorRoutes);
   app.use("/api", codegenRoutes);
+  app.use("/api/blueprint-safe-state", blueprintSafeStateRoutes); // #459 watchdog & safe-state
+  // Combined node router: #454 GET /:id/state/:key + #456 GET / and /history.
+  app.use("/api/nodes", nodeRoutes);
+  app.use("/api/admin/anchor-backend", adminAnchorRoutes); // #455 Anchor-Backend Switch UX
 
   // Convenience routes for agent outputs and proposals (redirect to agentRoutes)
   app.get("/api/agent-outputs", async (req, res, next) => {
@@ -80,6 +105,56 @@ export async function registerRoutes(
   // WebSocket servers initialize if available
   try { tagStreamServer?.initialize(httpServer, "/ws/tags"); } catch {}
   try { unifiedStreamServer?.initialize(httpServer, "/ws"); } catch {}  // unified endpoint (#255)
+
+  // Feed live tag updates into the predictive maintenance engine (#212)
+  tagStreamServer.onTagUpdate((update) =>
+    predictiveMaintenanceService.ingestTagUpdate(update)
+  );
+
+  // Start the periodic analysis sweep here — services/initializeServices()
+  // has no callers at startup, so registering there alone never runs it.
+  void predictiveMaintenanceService.initialize();
+
+  // Surface predictive alerts on the alarm WebSocket channel so they reach
+  // operators, not just the REST API.
+  predictiveMaintenanceService.on("alert", (alert) => {
+    void import("./websocket/cached-event-bridge").then(({ cachedEventBridge }) =>
+      cachedEventBridge.publishAlarm({
+        id: alert.id,
+        name: `Predictive: ${alert.tagId}`,
+        tagId: alert.tagId,
+        severity: alert.severity,
+        state: "active",
+        message: alert.message,
+        tagValue: undefined,
+        triggeredAt: new Date(alert.timestamp).toISOString(),
+        timestamp: new Date(alert.timestamp).toISOString(),
+        source: "predictive-maintenance",
+        recommendation: alert.recommendation,
+      })
+    ).catch(() => { /* alarm fan-out failure must not break alerting */ });
+  });
+  // Start alarm-correlation idle-group sweeps (#213). Registered here rather
+  // than in services/initializeServices(), which no startup path invokes.
+  void alarmCorrelationService.initialize();
+
+  // Feed live tag updates into the digital twin and start its step timer
+  // here — services/initializeServices() has no callers at startup (#214).
+  tagStreamServer.onTagUpdate((update) => digitalTwinService.ingestTagUpdate(update));
+  void digitalTwinService.initialize();
+
+  // Start the tuning service (and its underlying optimization service)
+  // here — services/initializeServices() has no callers at startup (#215).
+  void tuningService.initialize();
+
+  // Feed live tag updates into the NL query store and start the service
+  // here — services/initializeServices() has no callers at startup (#216).
+  tagStreamServer.onTagUpdate((update) => nlQueryService.ingestTagUpdate(update));
+  void nlQueryService.initialize();
+
+  // Start the marketplace service here — services/initializeServices()
+  // has no callers at startup (#217).
+  void marketplaceService.initialize();
 
   // WebSocket metrics endpoint. The legacy event-stream server was removed;
   // only the tag and unified streams report (#446, #479).

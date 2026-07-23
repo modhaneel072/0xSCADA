@@ -7,6 +7,7 @@ import { log, logError } from "./logger";
 import { healthRouter, healthManager } from "./health";
 import { registerSwaggerRoutes } from "./openapi";
 import { setupApiGateway } from "./middleware/api-gateway";
+import { initializeDatabase } from "./storage";
 
 // Re-export log for backward compatibility
 export { log } from "./logger";
@@ -83,7 +84,6 @@ app.use((req, res, next) => {
 (async () => {
   // Initialize the database first — downstream services and health checks
   // depend on an established connection (SQLite fallback in development).
-  const { initializeDatabase } = await import("./storage");
   await initializeDatabase();
   log("Database initialized");
 
@@ -191,6 +191,11 @@ app.use((req, res, next) => {
       // Start Flux state engine integration (ADR-0015, Issue #260)
       const { startFluxIntegration } = await import("./services/flux");
       startFluxIntegration();
+
+      // Start MQTT Sparkplug B bridge (Issue #463) — no-op unless
+      // SPARKPLUG_BROKER_URL is configured.
+      const { startSparkplugBridge } = await import("./protocols/sparkplug-b");
+      startSparkplugBridge();
 
       // Connect to NATS for SCADA event publishing
       const { natsPublisher } = await import("./services/nats");

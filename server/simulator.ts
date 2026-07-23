@@ -1,5 +1,6 @@
 import { log, logError, logWarn } from "./logger";
 import { tagStreamServer } from "./websocket/tag-stream";
+import { cachedEventBridge } from "./websocket/cached-event-bridge";
 import { getFluxPublisher } from "./services/flux";
 import { natsPublisher } from "./services/nats";
 import { getAnchorPipeline } from "./bridge";
@@ -104,17 +105,49 @@ class FieldSimulator {
         ...(typeof payload === 'object' ? payload : { value: payload }),
       });
 
-      // Broadcast tag update to live dashboard via WebSocket
+      // Broadcast tag update to live dashboard via WebSocket. Prefer any
+      // numeric measurement in the payload (current, newValue, ...) so
+      // numeric consumers like predictive maintenance receive real data
+      // instead of a JSON blob string (#212).
       try {
+        const numeric =
+          typeof payload === 'object' && payload !== null
+            ? [payload.value, payload.current, payload.newValue].find(
+                (v: unknown) => typeof v === 'number' && Number.isFinite(v)
+              )
+            : undefined;
         tagStreamServer.broadcastTagUpdate({
           tagName: `${asset.nameOrTag}.${eventType}`,
-          value: typeof payload === 'object' && payload !== null
-            ? (payload as any).value ?? JSON.stringify(payload)
-            : payload,
+          value:
+            numeric ??
+            (typeof payload === 'object' && payload !== null
+              ? JSON.stringify(payload)
+              : payload),
           quality: "good",
           timestamp: new Date().toISOString(),
         });
       } catch { /* WebSocket not connected — that's fine */ }
+
+      // Raise a real alarm for trip events — feeds the correlation engine
+      // and the alarm WebSocket channel, which had no producer (#213)
+      if (eventType === "BREAKER_TRIP") {
+        try {
+          void cachedEventBridge.publishAlarm({
+            id: `ALM-${asset.nameOrTag}-${Date.now()}`,
+            name: `${asset.nameOrTag} ${eventType}`,
+            tagId: `${asset.nameOrTag}.${eventType}`,
+            equipmentId: asset.nameOrTag,
+            siteId: asset.siteId,
+            severity: asset.critical ? "critical" : "high",
+            state: "active",
+            message: details,
+            timestamp: new Date().toISOString(),
+            triggeredAt: new Date().toISOString(),
+            value: (payload as any).current,
+            source: "simulator",
+          });
+        } catch { /* alarm fan-out failure must not break event generation */ }
+      }
 
       // Publish to NATS for blockchain anchoring (canonical wire schema, #440)
       try {

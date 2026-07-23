@@ -62,9 +62,33 @@ export { optimizationService } from './optimization';
 export * from './spc';
 export { spcService } from './spc';
 
+// ── Predictive Maintenance Service (ADR-0013 [13.1], #212) ───────────────────
+export * from './predictive';
+export { predictiveMaintenanceService } from './predictive';
+
 // ── Layer 2 Rollup Service ───────────────────────────────────────────────────
 export * from './l2-rollup';
 export { l2RollupService } from './l2-rollup';
+
+// ── Alarm Correlation Service (ADR-0013 [13.2], #213) ────────────────────────
+export * from './alarm-correlation';
+export { alarmCorrelationService } from './alarm-correlation';
+
+// ── Digital Twin Service (ADR-0013 [13.3], #214) ─────────────────────────────
+export * from './twin';
+export { digitalTwinService } from './twin';
+
+// ── PID Tuning Service (ADR-0013 [13.4], #215) ───────────────────────────────
+export * from './tuning';
+export { tuningService } from './tuning';
+
+// ── NL Query Service (ADR-0013 [13.5], #216) ─────────────────────────────────
+export * from './nlquery';
+export { nlQueryService } from './nlquery';
+
+// ── Agent Marketplace Service (ADR-0013 [13.6], #217) ────────────────────────
+export * from './marketplace';
+export { marketplaceService } from './marketplace';
 
 /**
  * Initialize all services
@@ -80,7 +104,13 @@ export async function initializeServices(): Promise<void> {
     { name: 'Ubiquity', service: () => import('./ubiquity').then(m => m.ubiquityService.initialize()) },
     { name: 'Layer 2 Rollup', service: () => import('./l2-rollup').then(m => m.l2RollupService.initialize()) },
     { name: 'Optimization', service: () => import('./optimization').then(m => m.optimizationService.initialize()) },
-    { name: 'SPC', service: () => import('./spc').then(m => m.spcService.initialize()) }
+    { name: 'SPC', service: () => import('./spc').then(m => m.spcService.initialize()) },
+    { name: 'Predictive Maintenance', service: () => import('./predictive').then(m => m.predictiveMaintenanceService.initialize()) },
+    { name: 'Alarm Correlation', service: () => import('./alarm-correlation').then(m => m.alarmCorrelationService.initialize()) },
+    { name: 'Digital Twin', service: () => import('./twin').then(m => m.digitalTwinService.initialize()) },
+    { name: 'PID Tuning', service: () => import('./tuning').then(m => m.tuningService.initialize()) },
+    { name: 'NL Query', service: () => import('./nlquery').then(m => m.nlQueryService.initialize()) },
+    { name: 'Agent Marketplace', service: () => import('./marketplace').then(m => m.marketplaceService.initialize()) }
   ];
 
   for (const { name, service } of services) {
@@ -171,6 +201,54 @@ export async function getServicesHealthStatus(): Promise<{
         return await spcService.healthCheck();
       } catch {
         return { healthy: false, message: 'SPC service not available' };
+      }
+    },
+    predictive: async () => {
+      try {
+        const { predictiveMaintenanceService } = await import('./predictive');
+        return await predictiveMaintenanceService.healthCheck();
+      } catch {
+        return { healthy: false, message: 'Predictive maintenance service not available' };
+      }
+    },
+    alarmCorrelation: async () => {
+      try {
+        const { alarmCorrelationService } = await import('./alarm-correlation');
+        return await alarmCorrelationService.healthCheck();
+      } catch {
+        return { healthy: false, message: 'Alarm correlation service not available' };
+      }
+    },
+    twin: async () => {
+      try {
+        const { digitalTwinService } = await import('./twin');
+        return await digitalTwinService.healthCheck();
+      } catch {
+        return { healthy: false, message: 'Digital twin service not available' };
+      }
+    },
+    tuning: async () => {
+      try {
+        const { tuningService } = await import('./tuning');
+        return await tuningService.healthCheck();
+      } catch {
+        return { healthy: false, message: 'Tuning service not available' };
+      }
+    },
+    nlquery: async () => {
+      try {
+        const { nlQueryService } = await import('./nlquery');
+        return await nlQueryService.healthCheck();
+      } catch {
+        return { healthy: false, message: 'NL query service not available' };
+      }
+    },
+    marketplace: async () => {
+      try {
+        const { marketplaceService } = await import('./marketplace');
+        return await marketplaceService.healthCheck();
+      } catch {
+        return { healthy: false, message: 'Marketplace service not available' };
       }
     }
   };
