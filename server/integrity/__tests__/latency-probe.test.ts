@@ -16,8 +16,11 @@ import { EventEmitter } from 'events';
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   ControlLoopLatencyProbe,
+  PRODUCTION_LATENCY_PROBE_STATUS,
   createSentinelBlueprint,
   createPipelineStageExecutors,
+  productionLatencyProbeUpGauge,
+  publishProductionLatencyProbeStatus,
   type StageExecutors,
   type PipelineLike,
   type SignerLike,
@@ -48,6 +51,17 @@ function makeAdvancingClock(): { clock: Clock; advance: (ms: number) => void } {
 describe('ControlLoopLatencyProbe', () => {
   beforeEach(() => {
     registry.reset();
+  });
+
+  it('publishes an explicit held/down production gauge for Alertmanager', () => {
+    publishProductionLatencyProbeStatus();
+
+    expect(PRODUCTION_LATENCY_PROBE_STATUS).toMatchObject({
+      state: 'HELD',
+      running: false,
+    });
+    expect(productionLatencyProbeUpGauge.get()).toBe(0);
+    expect(registry.metrics()).toContain('scada_control_loop_probe_up 0');
   });
 
   it('creates an isolated, non-control-relevant sentinel blueprint', () => {

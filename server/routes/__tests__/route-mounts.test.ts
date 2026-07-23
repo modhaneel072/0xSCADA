@@ -10,6 +10,7 @@ import type { Server } from 'http';
 
 vi.mock('../../storage', () => ({
   storage: {
+    transaction: vi.fn(async (operation: () => Promise<unknown>) => operation()),
     getControlModuleTypes: vi.fn(async () => [{ id: 'cm-1', name: 'Valve' }]),
     getControlModuleInstances: vi.fn(async () => [{ id: 'cmi-1' }]),
     getUnitTypes: vi.fn(async () => []),
@@ -30,6 +31,8 @@ vi.mock('../../storage', () => ({
     upsertPhaseType: vi.fn(async (input: any) => ({ id: 'phase-new', ...input })),
     createControlModuleInstance: vi.fn(async (input: any) => ({ id: 'cmi-new', ...input })),
     createUnitInstance: vi.fn(async (input: any) => ({ id: 'ui-new', ...input })),
+    upsertControlModuleInstance: vi.fn(async (input: any) => ({ id: 'cmi-new', ...input })),
+    upsertUnitInstance: vi.fn(async (input: any) => ({ id: 'ui-new', ...input })),
     upsertVendor: vi.fn(async (input: any) => ({ id: `v-${input.name}`, ...input })),
     upsertDataTypeMapping: vi.fn(async (input: any) => ({ id: `dt-${input.canonicalType}`, ...input })),
   },
@@ -48,11 +51,20 @@ import { vendorRoutes } from '../vendors';
 import { codegenRoutes } from '../codegen';
 import { assetRoutes } from '../assets';
 import { storage } from '../../storage';
+import { _resetControlPlaneAuthCache } from '../../middleware/control-plane-auth';
 
 let server: Server;
 let base: string;
+const originalApiKeys = process.env.API_KEYS;
+const blueprintWriteHeaders = {
+  'content-type': 'application/json',
+  'x-api-key': 'blueprint-test-key',
+};
 
 beforeAll(async () => {
+  process.env.API_KEYS =
+    'blueprint-test-key:blueprint-test-operator:operator+blueprints.write';
+  _resetControlPlaneAuthCache();
   const app = express();
   app.use(express.json());
   // Mirror the mounts in server/routes.ts registerRoutes
@@ -72,17 +84,29 @@ beforeAll(async () => {
 
 afterAll(() => {
   server?.close();
+  if (originalApiKeys === undefined) delete process.env.API_KEYS;
+  else process.env.API_KEYS = originalApiKeys;
+  _resetControlPlaneAuthCache();
 });
 
 describe('blueprint routes keep their public paths', () => {
-  it('GET /api/blueprints/cm-types', async () => {
+  it('requires an operator API key for blueprint reads', async () => {
     const res = await fetch(`${base}/api/blueprints/cm-types`);
+    expect(res.status).toBe(401);
+  });
+
+  it('GET /api/blueprints/cm-types', async () => {
+    const res = await fetch(`${base}/api/blueprints/cm-types`, {
+      headers: blueprintWriteHeaders,
+    });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual([{ id: 'cm-1', name: 'Valve' }]);
   });
 
   it('GET /api/blueprints/summary aggregates counts', async () => {
-    const res = await fetch(`${base}/api/blueprints/summary`);
+    const res = await fetch(`${base}/api/blueprints/summary`, {
+      headers: blueprintWriteHeaders,
+    });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.controlModuleTypes).toBe(1);
@@ -94,7 +118,7 @@ describe('blueprint routes keep their public paths', () => {
     // handler rejects it with 400, proving it is no longer a 501 stub.
     const res = await fetch(`${base}/api/blueprints/import`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: blueprintWriteHeaders,
       body: '{}',
     });
     expect(res.status).toBe(400);
@@ -107,7 +131,7 @@ describe('blueprint routes keep their public paths', () => {
     // parse to 200, not throw a 500 dereferencing the absent designSpec.
     const res = await fetch(`${base}/api/blueprints/import`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: blueprintWriteHeaders,
       body: JSON.stringify({ cmTypePackage: [] }),
     });
     expect(res.status).toBe(200);
@@ -119,7 +143,7 @@ describe('blueprint routes keep their public paths', () => {
   it('POST /api/blueprints/import persists parsed entities (#511)', async () => {
     const res = await fetch(`${base}/api/blueprints/import`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: blueprintWriteHeaders,
       body: JSON.stringify({
         cmTypePackage: [{
           name: 'cm-type-MotorValve.md',
@@ -143,7 +167,10 @@ describe('blueprint routes keep their public paths', () => {
   });
 
   it('POST /api/blueprints/seed is functional and reports seeded rows', async () => {
-    const res = await fetch(`${base}/api/blueprints/seed`, { method: 'POST' });
+    const res = await fetch(`${base}/api/blueprints/seed`, {
+      method: 'POST',
+      headers: { 'x-api-key': 'blueprint-test-key' },
+    });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.success).toBe(true);

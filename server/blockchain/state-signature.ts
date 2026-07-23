@@ -3,7 +3,8 @@
  *
  * Pure, dependency-free helpers for the signature half of the per-validator
  * `/state/:key` proxy. A validator returns a value for a key together with a
- * signature over a canonical representation of `(key, value, blockHeight)`.
+ * signature over a canonical representation of
+ * `(key, value, blockHeight, nonce, observedAt)`.
  * Before the server hands the response back to an operator it MUST verify that
  * signature against the validator's registered public key.
  *
@@ -39,6 +40,10 @@ export interface SignedStateResponse {
   value: unknown;
   /** Block height / sequence at which this value was observed. */
   blockHeight: number;
+  /** Per-request challenge supplied by the proxy. */
+  nonce: string;
+  /** ISO-8601 time at which the validator observed the value. */
+  observedAt: string;
   /** Optional identifier of the key the validator signed with (for rotation). */
   keyId?: string;
   /** Hex-encoded Ed25519 signature over the canonical message. */
@@ -56,6 +61,17 @@ export type SignatureFailureReason =
   | "malformed-pubkey"
   | "signature-mismatch";
 
+export type FreshnessFailureReason =
+  | "key-mismatch"
+  | "nonce-mismatch"
+  | "invalid-observed-at"
+  | "stale-response"
+  | "future-response";
+
+export type FreshnessVerificationResult =
+  | { valid: true }
+  | { valid: false; reason: FreshnessFailureReason };
+
 /**
  * Build the canonical, deterministic message that is signed/verified.
  *
@@ -65,23 +81,67 @@ export type SignatureFailureReason =
  *   - JSON-serialize the value with sorted object keys so semantically-equal
  *     objects always produce identical bytes.
  *
- * Format: `oxscada-state-v1\n<key>\n<blockHeight>\n<canonicalJson(value)>`
+ * Format:
+ * `oxscada-state-v2\n<key>\n<blockHeight>\n<nonce>\n<observedAt>\n<canonicalJson(value)>`
  *
- * The `oxscada-state-v1` domain-separation prefix prevents a signature minted
+ * The `oxscada-state-v2` domain-separation prefix prevents a signature minted
  * for some other purpose from being replayed as a state attestation.
  */
 export function buildStateSigningMessage(params: {
   key: string;
   value: unknown;
   blockHeight: number;
+  nonce: string;
+  observedAt: string;
 }): string {
   const canonicalValue = canonicalJsonStringify(params.value);
   return [
-    "oxscada-state-v1",
+    "oxscada-state-v2",
     params.key,
     String(params.blockHeight),
+    params.nonce,
+    params.observedAt,
     canonicalValue,
   ].join("\n");
+}
+
+/**
+ * Verify that a validly signed response belongs to this request and is recent.
+ * A captured response cannot satisfy a new random nonce, while the timestamp
+ * bounds prevent a validator from returning an indefinitely old observation.
+ */
+export function verifyStateResponseFreshness(
+  response: SignedStateResponse,
+  expected: {
+    key: string;
+    nonce: string;
+    nowMs?: number;
+    maxAgeMs?: number;
+    maxFutureSkewMs?: number;
+  },
+): FreshnessVerificationResult {
+  if (response.key !== expected.key) {
+    return { valid: false, reason: "key-mismatch" };
+  }
+  if (response.nonce !== expected.nonce) {
+    return { valid: false, reason: "nonce-mismatch" };
+  }
+
+  const observedAtMs = Date.parse(response.observedAt);
+  if (!Number.isFinite(observedAtMs)) {
+    return { valid: false, reason: "invalid-observed-at" };
+  }
+
+  const nowMs = expected.nowMs ?? Date.now();
+  const maxAgeMs = expected.maxAgeMs ?? 30_000;
+  const maxFutureSkewMs = expected.maxFutureSkewMs ?? 5_000;
+  if (observedAtMs < nowMs - maxAgeMs) {
+    return { valid: false, reason: "stale-response" };
+  }
+  if (observedAtMs > nowMs + maxFutureSkewMs) {
+    return { valid: false, reason: "future-response" };
+  }
+  return { valid: true };
 }
 
 /**
@@ -99,7 +159,11 @@ function sortValue(value: unknown): unknown {
   }
   if (value !== null && typeof value === "object") {
     const obj = value as Record<string, unknown>;
-    const sorted: Record<string, unknown> = {};
+    // A normal `{}` treats the own key "__proto__" as a prototype setter.
+    // Using a null-prototype dictionary preserves every JSON key in the signed
+    // representation and prevents distinct payloads from canonicalizing to
+    // the same bytes.
+    const sorted: Record<string, unknown> = Object.create(null);
     for (const k of Object.keys(obj).sort()) {
       sorted[k] = sortValue(obj[k]);
     }
@@ -114,7 +178,8 @@ function sortValue(value: unknown): unknown {
  */
 export function parsePublicKeyPem(publicKeyPem: string): KeyObject | null {
   try {
-    return createPublicKey({ key: publicKeyPem, format: "pem" });
+    const key = createPublicKey({ key: publicKeyPem, format: "pem" });
+    return key.asymmetricKeyType === "ed25519" ? key : null;
   } catch {
     return null;
   }
@@ -160,6 +225,8 @@ export function verifySignedStateResponse(
       key: response.key,
       value: response.value,
       blockHeight: response.blockHeight,
+      nonce: response.nonce,
+      observedAt: response.observedAt,
     }),
     "utf8",
   );

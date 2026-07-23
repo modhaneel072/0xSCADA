@@ -8,21 +8,25 @@
  */
 
 import { Router } from "express";
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response } from "express";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error/v3";
 import { marketplaceService } from "../services/marketplace";
 import type { PluginCategory, PluginManifest } from "@shared/types/marketplace";
+import { requireControlPlaneAccess } from "../middleware/control-plane-auth";
 
 const router = Router();
 const marketplace = marketplaceService.marketplace;
 
-// Auth middleware placeholder — same pattern as other protected routes
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  // TODO: implement real auth check (JWT / session validation)
-  next();
-}
-router.use(requireAuth);
+router.use(requireControlPlaneAccess({ roles: ["operator"] }));
+const requireMarketplaceWrite = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["marketplace.write"],
+});
+const requireMarketplaceInvoke = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["marketplace.invoke"],
+});
 
 /** Engine lifecycle errors map to 400s with the engine's message */
 function handle(fn: (req: Request, res: Response) => void | Promise<void>) {
@@ -86,7 +90,7 @@ router.get("/plugins", (req, res) => {
   res.json({ plugins: marketplace.search(query, category) });
 });
 
-router.post("/plugins", handle((req, res) => {
+router.post("/plugins", requireMarketplaceWrite, handle((req, res) => {
   const parsed = ManifestSchema.safeParse(req.body);
   if (!parsed.success) {
     return void res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -107,7 +111,7 @@ router.get("/installed", (_req, res) => {
   res.json({ plugins: marketplace.listInstalled() });
 });
 
-router.post("/plugins/:pluginId/install", handle((req, res) => {
+router.post("/plugins/:pluginId/install", requireMarketplaceWrite, handle((req, res) => {
   const parsed = InstallSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
     return void res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -117,11 +121,11 @@ router.post("/plugins/:pluginId/install", handle((req, res) => {
   );
 }));
 
-router.post("/plugins/:pluginId/update", handle((req, res) => {
+router.post("/plugins/:pluginId/update", requireMarketplaceWrite, handle((req, res) => {
   res.json(marketplace.update(req.params.pluginId));
 }));
 
-router.put("/plugins/:pluginId/config", handle((req, res) => {
+router.put("/plugins/:pluginId/config", requireMarketplaceWrite, handle((req, res) => {
   const parsed = ConfigSchema.safeParse(req.body);
   if (!parsed.success) {
     return void res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -129,30 +133,30 @@ router.put("/plugins/:pluginId/config", handle((req, res) => {
   res.json(marketplace.configure(req.params.pluginId, parsed.data.config));
 }));
 
-router.post("/plugins/:pluginId/start", handle((req, res) => {
+router.post("/plugins/:pluginId/start", requireMarketplaceWrite, handle((req, res) => {
   res.json(marketplace.start(req.params.pluginId));
 }));
 
-router.post("/plugins/:pluginId/stop", handle((req, res) => {
+router.post("/plugins/:pluginId/stop", requireMarketplaceWrite, handle((req, res) => {
   res.json(marketplace.stop(req.params.pluginId));
 }));
 
-router.post("/plugins/:pluginId/enable", handle((req, res) => {
+router.post("/plugins/:pluginId/enable", requireMarketplaceWrite, handle((req, res) => {
   res.json(marketplace.enable(req.params.pluginId));
 }));
 
-router.post("/plugins/:pluginId/disable", handle((req, res) => {
+router.post("/plugins/:pluginId/disable", requireMarketplaceWrite, handle((req, res) => {
   res.json(marketplace.disable(req.params.pluginId));
 }));
 
-router.delete("/plugins/:pluginId", handle((req, res) => {
+router.delete("/plugins/:pluginId", requireMarketplaceWrite, handle((req, res) => {
   marketplace.uninstall(req.params.pluginId);
   res.json({ uninstalled: true });
 }));
 
 // ── Execution & health ─────────────────────────────────────────────────────
 
-router.post("/plugins/:pluginId/invoke", handle(async (req, res) => {
+router.post("/plugins/:pluginId/invoke", requireMarketplaceInvoke, handle(async (req, res) => {
   const parsed = InvokeSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
     return void res.status(400).json({ error: fromZodError(parsed.error).message });

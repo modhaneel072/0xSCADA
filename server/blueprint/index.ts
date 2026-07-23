@@ -77,6 +77,7 @@ export {
   type SchedPolicy,
   type SchedulerConfig,
   type SchedulerStatus,
+  type DedicatedSchedulerTarget,
   type RtCapability,
   type HostProbe,
   type RtSyscall,
@@ -106,12 +107,14 @@ export function getScheduler(): TickScheduler {
 }
 
 /**
- * Apply real-time scheduling at server startup. Idempotent (the scheduler only
- * acts once and warns at most once). Call this early in the boot sequence,
- * before the control loop begins.
+ * Explicitly apply real-time scheduling to a dedicated control process.
+ * Requiring the target prevents health imports or Express startup from
+ * accidentally elevating the main server process.
  */
-export function applyScheduler(): ReturnType<TickScheduler['apply']> {
-  return getScheduler().apply();
+export function applyScheduler(
+  target: import("./scheduler.js").DedicatedSchedulerTarget,
+): ReturnType<TickScheduler['apply']> {
+  return getScheduler().apply(target);
 }
 
 /**
@@ -180,6 +183,13 @@ export {
   BridgeAnchorBackend,
   DrizzleSafeStateAuditSink,
 } from "./safe-state-adapters";
+export {
+  BLUEPRINT_PRODUCTION_HOLD_CODE,
+  BLUEPRINT_PRODUCTION_HOLD_REASON,
+  createBlueprintProductionHoldMiddleware,
+  getBlueprintProductionSafetyStatus,
+  type BlueprintProductionSafetyStatus,
+} from "./production-safety";
 
 /**
  * Registry of active blueprint watchdogs. One {@link Watchdog} is created per
@@ -219,8 +229,8 @@ export class WatchdogRegistry {
     return [...this.watchdogs.values()].map((w) => w.getStatus());
   }
 
-  /** Only the blueprints currently running in safe state. */
+  /** Blueprints in safe-state handling, including degraded recovery states. */
   getSafeStateStatuses(): SafeStateStatus[] {
-    return this.getAllStatuses().filter((s) => s.runState === "SAFE_STATE");
+    return this.getAllStatuses().filter((s) => s.runState !== "RUNNING");
   }
 }

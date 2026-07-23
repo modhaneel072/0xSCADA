@@ -105,7 +105,8 @@ npm run db:migrate
 # Start development (server + client)
 npm run dev
 
-# Or bring up the full stack with Docker
+# Or bring up the full stack with Docker. Set API_KEYS first to use
+# operator-only control-plane routes; see docs/security/control-plane-api-keys.md.
 docker compose up -d
 ```
 

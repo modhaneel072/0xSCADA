@@ -9,21 +9,21 @@
  */
 
 import { Router } from "express";
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response } from "express";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error/v3";
 import { digitalTwinService, listStepFunctions } from "../services/twin";
 import type { ProcessModel, WhatIfScenario } from "@shared/types/digital-twin";
+import { requireControlPlaneAccess } from "../middleware/control-plane-auth";
 
 const router = Router();
 const runtime = digitalTwinService.runtime;
 
-// Auth middleware placeholder — same pattern as other protected routes
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  // TODO: implement real auth check (JWT / session validation)
-  next();
-}
-router.use(requireAuth);
+router.use(requireControlPlaneAccess({ roles: ["operator"] }));
+const requireTwinWrite = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["twin.write"],
+});
 
 /** Uniform 400 for engine validation errors thrown from handlers */
 function handle(fn: (req: Request, res: Response) => void) {
@@ -96,7 +96,7 @@ const StepSchema = z.object({
 
 // ── Model registry ─────────────────────────────────────────────────────────
 
-router.post("/models", handle((req, res) => {
+router.post("/models", requireTwinWrite, handle((req, res) => {
   const parsed = ModelSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -115,7 +115,7 @@ router.get("/models/:modelId", (req, res) => {
   res.json({ model, state: runtime.getState(req.params.modelId) });
 });
 
-router.delete("/models/:modelId", (req, res) => {
+router.delete("/models/:modelId", requireTwinWrite, (req, res) => {
   if (!runtime.removeModel(req.params.modelId)) {
     return res.status(404).json({ error: `Model ${req.params.modelId} not found` });
   }
@@ -124,19 +124,19 @@ router.delete("/models/:modelId", (req, res) => {
 
 // ── Simulation control ─────────────────────────────────────────────────────
 
-router.post("/models/:modelId/start", handle((req, res) => {
+router.post("/models/:modelId/start", requireTwinWrite, handle((req, res) => {
   res.json(runtime.setRunning(req.params.modelId, true));
 }));
 
-router.post("/models/:modelId/stop", handle((req, res) => {
+router.post("/models/:modelId/stop", requireTwinWrite, handle((req, res) => {
   res.json(runtime.setRunning(req.params.modelId, false));
 }));
 
-router.post("/models/:modelId/reset", handle((req, res) => {
+router.post("/models/:modelId/reset", requireTwinWrite, handle((req, res) => {
   res.json(runtime.resetModel(req.params.modelId));
 }));
 
-router.post("/models/:modelId/step", handle((req, res) => {
+router.post("/models/:modelId/step", requireTwinWrite, handle((req, res) => {
   const parsed = StepSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -152,7 +152,7 @@ router.get("/models/:modelId/state", (req, res) => {
 
 // ── Live sync & comparison ─────────────────────────────────────────────────
 
-router.post("/models/:modelId/sync", handle((req, res) => {
+router.post("/models/:modelId/sync", requireTwinWrite, handle((req, res) => {
   res.json(runtime.syncFromLive(req.params.modelId, Date.now()));
 }));
 
@@ -162,7 +162,7 @@ router.get("/models/:modelId/compare", handle((req, res) => {
 
 // ── What-if & rollback simulation ──────────────────────────────────────────
 
-router.post("/scenarios", handle((req, res) => {
+router.post("/scenarios", requireTwinWrite, handle((req, res) => {
   const parsed = ScenarioSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -170,7 +170,7 @@ router.post("/scenarios", handle((req, res) => {
   res.json(runtime.runScenario(parsed.data as WhatIfScenario));
 }));
 
-router.post("/models/:modelId/rollback-simulation", handle((req, res) => {
+router.post("/models/:modelId/rollback-simulation", requireTwinWrite, handle((req, res) => {
   const parsed = RollbackSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });

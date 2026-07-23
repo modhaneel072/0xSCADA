@@ -438,8 +438,10 @@ export class BlueprintControlLoop {
   }
 
   /**
-   * Apply the scheduler (pin to SCHED_FIFO or fall back) and begin ticking.
-   * Returns the resolved scheduler status so callers can log/inspect it.
+   * Resolve scheduler posture and begin ticking. This in-process timer never
+   * supplies a dedicated control-process PID, so the scheduler must remain in
+   * fallback mode and cannot elevate the Express process. A production RT
+   * composition requires a separate control-process driver.
    */
   start(): SchedulerStatus {
     if (this.running) return this.scheduler.status();

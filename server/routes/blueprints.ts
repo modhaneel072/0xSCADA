@@ -13,12 +13,21 @@ import {
   importBlueprints,
   validateCMReferences,
   validateUnitReferences,
+  validateInstanceBindings,
   validatePhaseReferences,
-  seedBlueprintDatabase,
   type BlueprintFiles,
 } from "../blueprints";
+import { seedBlueprintDatabase } from "../blueprints/seed-database";
+import { requireControlPlaneAccess } from "../middleware/control-plane-auth";
 
 const router = Router();
+router.use(requireControlPlaneAccess({
+  roles: ["operator"],
+}));
+const requireBlueprintWrite = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["blueprints.write"],
+});
 
 async function persistBlueprintImport(
   parsed: ReturnType<typeof importBlueprints>,
@@ -62,13 +71,18 @@ async function persistBlueprintImport(
     });
   }
 
-  const unitInstanceIds = new Map<string, string>();
+  const unitInstanceIds = new Map<string, Set<string>>();
   let unitInstances = 0;
   for (const group of parsed.unitInstances) {
-    const unitTypeId = unitTypeIds.get(group.unitTypeName);
-    if (!unitTypeId) continue;
     for (const instance of group.instances) {
-      const stored = await storage.createUnitInstance({
+      const unitTypeName = instance.unitType || group.unitTypeName;
+      const unitTypeId = unitTypeIds.get(unitTypeName);
+      if (!unitTypeId) {
+        throw new Error(
+          `Unit instance ${instance.name} references unknown Unit type ${unitTypeName}`,
+        );
+      }
+      const stored = await storage.upsertUnitInstance({
         name: instance.name,
         instanceNumber: instance.instanceNumber,
         unitTypeId,
@@ -78,7 +92,9 @@ async function persistBlueprintImport(
         area: instance.area,
         comment: instance.comment,
       });
-      unitInstanceIds.set(instance.name, stored.id);
+      const matchingIds = unitInstanceIds.get(instance.name) ?? new Set<string>();
+      matchingIds.add(stored.id);
+      unitInstanceIds.set(instance.name, matchingIds);
       unitInstances += 1;
     }
   }
@@ -88,13 +104,22 @@ async function persistBlueprintImport(
     const controlModuleTypeId = controlModuleTypeIds.get(group.cmTypeName);
     if (!controlModuleTypeId) continue;
     for (const instance of group.instances) {
-      await storage.createControlModuleInstance({
+      const matchingUnitIds = instance.unitInstance
+        ? unitInstanceIds.get(instance.unitInstance)
+        : undefined;
+      if (instance.unitInstance && matchingUnitIds?.size !== 1) {
+        throw new Error(
+          `CM instance ${instance.name} has an unresolved or ambiguous Unit instance ` +
+          `reference: ${instance.unitInstance}`,
+        );
+      }
+      await storage.upsertControlModuleInstance({
         name: instance.name,
         instanceNumber: instance.instanceNumber,
         controlModuleTypeId,
         controllerId: instance.controller,
-        unitInstanceId: instance.unitInstance
-          ? unitInstanceIds.get(instance.unitInstance)
+        unitInstanceId: matchingUnitIds
+          ? [...matchingUnitIds][0]
           : undefined,
         pidDrawing: instance.pidDrawing,
         comment: instance.comment,
@@ -137,7 +162,7 @@ router.get("/cm-types/:name", async (req, res) => {
   }
 });
 
-router.post("/cm-types", async (req, res) => {
+router.post("/cm-types", requireBlueprintWrite, async (req, res) => {
   try {
     const cmType = await (storage as any).createControlModuleType(req.body);
     res.status(201).json(cmType);
@@ -169,7 +194,7 @@ router.get("/unit-types", async (req, res) => {
   }
 });
 
-router.post("/unit-types", async (req, res) => {
+router.post("/unit-types", requireBlueprintWrite, async (req, res) => {
   try {
     const unitType = await (storage as any).createUnitType(req.body);
     res.status(201).json(unitType);
@@ -201,7 +226,7 @@ router.get("/phase-types", async (req, res) => {
   }
 });
 
-router.post("/phase-types", async (req, res) => {
+router.post("/phase-types", requireBlueprintWrite, async (req, res) => {
   try {
     const phaseType = await (storage as any).createPhaseType(req.body);
     res.status(201).json(phaseType);
@@ -233,7 +258,7 @@ router.get("/design-specs", async (req, res) => {
   }
 });
 
-router.post("/import", async (req, res) => {
+router.post("/import", requireBlueprintWrite, async (req, res) => {
   try {
     const files = req.body as BlueprintFiles;
     if (!files || (!files.cmTypePackage && !files.designSpec)) {
@@ -248,12 +273,19 @@ router.post("/import", async (req, res) => {
     const refErrors = [
       ...validateCMReferences(parsed.cmTypes, parsed.cmInstances),
       ...validateUnitReferences(parsed.unitTypes, parsed.unitInstances),
+      ...validateInstanceBindings(
+        parsed.unitTypes,
+        parsed.unitInstances,
+        parsed.cmInstances,
+      ),
       ...validatePhaseReferences(parsed.cmTypes, parsed.phaseTypes),
     ];
     if (refErrors.length > 0) {
       return res.status(400).json({ error: "Reference validation failed", errors: refErrors, warnings: parsed.warnings });
     }
-    const persisted = await persistBlueprintImport(parsed);
+    const persisted = await storage.transaction(() =>
+      persistBlueprintImport(parsed),
+    );
     res.json({
       success: true,
       persisted: true,
@@ -266,7 +298,7 @@ router.post("/import", async (req, res) => {
   }
 });
 
-router.post("/seed", async (req, res) => {
+router.post("/seed", requireBlueprintWrite, async (req, res) => {
   try {
     const seeded = await seedBlueprintDatabase();
     res.json({ success: true, seeded });

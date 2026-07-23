@@ -8,10 +8,9 @@
  * PURE dry-run projection of cost/latency before a switch is committed.
  *
  * RELATIONSHIP TO #443: the canonical backend selection lives in
- * `./anchor-backend.ts`. This module is its control-plane sibling: it shares
- * the same {@link AnchorBackend} union and models the operator's switch
- * decision + projection. Its `dispatch()` per-backend send is still simulated;
- * the production bridge consumes the committed ANCHOR_BACKEND value.
+ * `./anchor-backend.ts`. The application singleton is bound to that shared
+ * runtime source, so an operator commit immediately affects production
+ * `anchorsToNode()` / `anchorsToL2()` decisions as well as this UI model.
  *
  * The projection logic (`projectSwitch`) is a PURE function with no external
  * dependencies so it is fully unit-testable.
@@ -21,7 +20,11 @@
 
 // Share the canonical backend union with #443 rather than redefining it, so the
 // two anchoring modules cannot drift.
-import type { AnchorBackend } from './anchor-backend';
+import {
+  getAnchorBackend,
+  setAnchorBackend,
+  type AnchorBackend,
+} from './anchor-backend';
 
 export type { AnchorBackend };
 
@@ -177,6 +180,11 @@ export interface DispatchResult {
   acks: Array<{ backend: 'l2' | 'node'; ref: string; eventCount: number }>;
 }
 
+export interface AnchorBackendStore {
+  get(): AnchorBackend;
+  set(backend: AnchorBackend): { previous: AnchorBackend; current: AnchorBackend };
+}
+
 /**
  * The operator-facing runtime switch. Holds the currently-active backend and
  * routes batches accordingly. Defaults from `ANCHOR_BACKEND` env (shared with
@@ -189,9 +197,21 @@ export interface DispatchResult {
 export class AnchorSwitch {
   private backend: AnchorBackend;
   private profiles: Record<'l2' | 'node', BackendProfile>;
+  private readonly backendStore?: AnchorBackendStore;
+  /**
+   * Promise-chain mutex for control-plane commits. The resolved tail never
+   * carries an operation's rejection, so one failed request cannot poison the
+   * queue for later requests.
+   */
+  private commitTail: Promise<void> = Promise.resolve();
 
-  constructor(opts?: { backend?: AnchorBackend; profiles?: Partial<Record<'l2' | 'node', BackendProfile>> }) {
+  constructor(opts?: {
+    backend?: AnchorBackend;
+    profiles?: Partial<Record<'l2' | 'node', BackendProfile>>;
+    backendStore?: AnchorBackendStore;
+  }) {
     this.backend = opts?.backend ?? parseBackendEnv(process.env.ANCHOR_BACKEND);
+    this.backendStore = opts?.backendStore;
     this.profiles = {
       l2: { ...DEFAULT_BACKEND_PROFILES.l2, ...(opts?.profiles?.l2 ?? {}) },
       node: { ...DEFAULT_BACKEND_PROFILES.node, ...(opts?.profiles?.node ?? {}) },
@@ -200,7 +220,7 @@ export class AnchorSwitch {
 
   /** The currently-active anchoring backend. */
   getBackend(): AnchorBackend {
-    return this.backend;
+    return this.backendStore?.get() ?? this.backend;
   }
 
   /**
@@ -208,13 +228,37 @@ export class AnchorSwitch {
    * endpoint) can record an auditable before/after in the switch event.
    */
   setBackend(backend: AnchorBackend): { previous: AnchorBackend; current: AnchorBackend } {
+    if (this.backendStore) {
+      return this.backendStore.set(backend);
+    }
     const previous = this.backend;
     this.backend = backend;
     return { previous, current: backend };
   }
 
+  /**
+   * Serialize a complete switch commit (readiness check, audit queueing, and
+   * state mutation). Callers must keep every commit side effect inside the
+   * callback so two operator requests cannot observe or roll back each other's
+   * state.
+   */
+  async runCommitExclusive<T>(operation: () => Promise<T> | T): Promise<T> {
+    const predecessor = this.commitTail;
+    let release!: () => void;
+    this.commitTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await predecessor;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
   /** Pure projection against the switch's current profiles. */
-  project(eventsPerMinute: number, backend: AnchorBackend = this.backend): SwitchProjection {
+  project(eventsPerMinute: number, backend: AnchorBackend = this.getBackend()): SwitchProjection {
     return projectSwitch({ backend, eventsPerMinute, profiles: this.profiles });
   }
 
@@ -227,7 +271,8 @@ export class AnchorSwitch {
    * seam are real; only the wire call is stubbed.
    */
   async dispatch(events: RoutableEvent[]): Promise<DispatchResult> {
-    const targets = backendsFor(this.backend);
+    const activeBackend = this.getBackend();
+    const targets = backendsFor(activeBackend);
     const acks = await Promise.all(
       targets.map(async (b) => ({
         backend: b,
@@ -235,7 +280,7 @@ export class AnchorSwitch {
         eventCount: events.length,
       })),
     );
-    return { backend: this.backend, acks };
+    return { backend: activeBackend, acks };
   }
 
   private async simulateSend(backend: 'l2' | 'node', events: RoutableEvent[]): Promise<string> {
@@ -256,5 +301,10 @@ export function parseBackendEnv(value: string | undefined): AnchorBackend {
   return 'node';
 }
 
-/** Singleton switch used by the application + the admin switch endpoint. */
-export const anchorSwitch = new AnchorSwitch();
+/** Singleton bound to the same source consumed by production anchor routing. */
+export const anchorSwitch = new AnchorSwitch({
+  backendStore: {
+    get: getAnchorBackend,
+    set: setAnchorBackend,
+  },
+});

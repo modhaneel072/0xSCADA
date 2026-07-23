@@ -10,19 +10,28 @@
  */
 
 import { Router } from "express";
-import type { Request, Response, NextFunction } from "express";
+import type { Request, Response } from "express";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error/v3";
 import { tuningService } from "../services/tuning";
+import {
+  controlPlanePrincipal,
+  requireControlPlaneAccess,
+} from "../middleware/control-plane-auth";
 
 const router = Router();
 
-// Auth middleware placeholder — same pattern as other protected routes
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  // TODO: implement real auth check (JWT / session validation)
-  next();
-}
-router.use(requireAuth);
+// All tuning data is operator-only. Mutations additionally require the narrow
+// service scope, and decisions use a separate approval grant.
+router.use(requireControlPlaneAccess({ roles: ["operator"] }));
+const requireTuningWrite = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["tuning.write"],
+});
+const requireTuningApproval = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["tuning.approve"],
+});
 
 /** Async handler wrapper (Express 4 does not catch async rejections) */
 function asyncHandler(fn: (req: Request, res: Response) => Promise<unknown>) {
@@ -100,13 +109,12 @@ const RLSchema = z.object({
 });
 
 const DecisionSchema = z.object({
-  approver: z.string().min(1).max(128),
   comment: z.string().max(2000).optional(),
 });
 
 // ── Loop registry ──────────────────────────────────────────────────────────
 
-router.post("/loops", (req, res) => {
+router.post("/loops", requireTuningWrite, (req, res) => {
   const parsed = LoopSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -140,7 +148,7 @@ router.get("/loops/:loopId", (req, res) => {
   });
 });
 
-router.put("/loops/:loopId/envelope", (req, res) => {
+router.put("/loops/:loopId/envelope", requireTuningWrite, (req, res) => {
   const parsed = EnvelopeSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -153,7 +161,7 @@ router.put("/loops/:loopId/envelope", (req, res) => {
 
 // ── Tuning (simulation-based; every result is a gated proposal) ────────────
 
-router.post("/loops/:loopId/tune/relay", asyncHandler(async (req, res) => {
+router.post("/loops/:loopId/tune/relay", requireTuningWrite, asyncHandler(async (req, res) => {
   const parsed = RelaySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -163,7 +171,7 @@ router.post("/loops/:loopId/tune/relay", asyncHandler(async (req, res) => {
   res.status(201).json(proposal);
 }));
 
-router.post("/loops/:loopId/tune/cohen-coon", asyncHandler(async (req, res) => {
+router.post("/loops/:loopId/tune/cohen-coon", requireTuningWrite, asyncHandler(async (req, res) => {
   const parsed = z.object({ model: ModelSchema }).safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -172,7 +180,7 @@ router.post("/loops/:loopId/tune/cohen-coon", asyncHandler(async (req, res) => {
   res.status(201).json(proposal);
 }));
 
-router.post("/loops/:loopId/tune/rl", asyncHandler(async (req, res) => {
+router.post("/loops/:loopId/tune/rl", requireTuningWrite, asyncHandler(async (req, res) => {
   const parsed = RLSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -206,28 +214,28 @@ router.get("/proposals/:proposalId", (req, res) => {
   res.json(proposal);
 });
 
-router.post("/proposals/:proposalId/approve", asyncHandler(async (req, res) => {
+router.post("/proposals/:proposalId/approve", requireTuningApproval, asyncHandler(async (req, res) => {
   const parsed = DecisionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
   }
   const proposal = await tuningService.decide(
     req.params.proposalId,
-    parsed.data.approver,
+    controlPlanePrincipal(req).name,
     "approve",
     parsed.data.comment
   );
   res.json(proposal);
 }));
 
-router.post("/proposals/:proposalId/reject", asyncHandler(async (req, res) => {
+router.post("/proposals/:proposalId/reject", requireTuningApproval, asyncHandler(async (req, res) => {
   const parsed = DecisionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
   }
   const proposal = await tuningService.decide(
     req.params.proposalId,
-    parsed.data.approver,
+    controlPlanePrincipal(req).name,
     "reject",
     parsed.data.comment
   );

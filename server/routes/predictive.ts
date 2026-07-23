@@ -8,21 +8,21 @@
  */
 
 import { Router } from "express";
-import type { Request, Response, NextFunction, RequestHandler } from "express";
+import type { Request, Response, RequestHandler } from "express";
 import { z } from "zod";
 import { fromZodError } from "zod-validation-error/v3";
 import { predictiveMaintenanceService } from "../services/predictive";
 import type { SeverityLevel } from "@shared/types/predictive";
+import { requireControlPlaneAccess } from "../middleware/control-plane-auth";
 
 const router = Router();
 const engine = predictiveMaintenanceService.engine;
 
-// Auth middleware placeholder — same pattern as other protected routes
-function requireAuth(req: Request, res: Response, next: NextFunction) {
-  // TODO: implement real auth check (JWT / session validation)
-  next();
-}
-router.use(requireAuth);
+router.use(requireControlPlaneAccess({ roles: ["operator"] }));
+const requirePredictiveWrite = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["predictive.write"],
+});
 
 /** Express 4 does not catch async rejections — wrap every async handler */
 function asyncHandler(
@@ -96,6 +96,7 @@ const AlertQuerySchema = z.object({
 
 router.post(
   "/ingest",
+  requirePredictiveWrite,
   asyncHandler(async (req, res) => {
     const parsed = IngestSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -160,7 +161,7 @@ router.get("/thresholds/:tagId", (req, res) => {
   res.json(engine.getThresholds(req.params.tagId));
 });
 
-router.put("/thresholds/:tagId", (req, res) => {
+router.put("/thresholds/:tagId", requirePredictiveWrite, (req, res) => {
   const parsed = ThresholdsSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -224,7 +225,7 @@ router.get("/alerts", (req, res) => {
   });
 });
 
-router.post("/alerts/:alertId/acknowledge", (req, res) => {
+router.post("/alerts/:alertId/acknowledge", requirePredictiveWrite, (req, res) => {
   const ok = engine.acknowledgeAlert(req.params.alertId);
   if (!ok) {
     return res.status(404).json({ error: `Alert ${req.params.alertId} not found` });

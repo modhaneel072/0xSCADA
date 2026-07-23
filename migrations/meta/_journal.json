@@ -15,6 +15,34 @@
       "when": 1739782801000,
       "tag": "0002_seed_rbac_defaults",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1784780400000,
+      "tag": "0003_blueprint_persistence",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1784780401000,
+      "tag": "0004_validator_registry",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1784780402000,
+      "tag": "0005_blueprint_safe_state_log",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1784780403000,
+      "tag": "0006_blueprint_instance_identity",
+      "breakpoints": true
     }
   ]
 }

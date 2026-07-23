@@ -354,7 +354,9 @@ export const templatePackages = pgTable("template_packages", {
   requiredInputs: jsonb("required_inputs").notNull().default(sql`'[]'::jsonb`),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  vendorIdx: index("idx_template_packages_vendor").on(table.vendorId),
+}));
 
 export const controlModuleTypes = pgTable("control_module_types", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -381,7 +383,7 @@ export const controlModuleInstances = pgTable("control_module_instances", {
   instanceNumber: integer("instance_number"),
   controlModuleTypeId: uuid("control_module_type_id").notNull().references(() => controlModuleTypes.id),
   controllerId: varchar("controller_id", { length: 255 }),
-  unitInstanceId: uuid("unit_instance_id"),
+  unitInstanceId: uuid("unit_instance_id").references(() => unitInstances.id),
   pidDrawing: text("pid_drawing"),
   comment: text("comment"),
   configuration: jsonb("configuration").notNull().default(sql`'{}'::jsonb`),
@@ -390,7 +392,15 @@ export const controlModuleInstances = pgTable("control_module_instances", {
   assetId: varchar("asset_id", { length: 64 }).references(() => assets.id),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  typeIdx: index("idx_control_module_instances_type").on(
+    table.controlModuleTypeId,
+  ),
+  typeNameIdx: uniqueIndex("idx_control_module_instances_type_name").on(
+    table.controlModuleTypeId,
+    table.name,
+  ),
+}));
 
 export const unitTypes = pgTable("unit_types", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -420,7 +430,13 @@ export const unitInstances = pgTable("unit_instances", {
   siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  typeIdx: index("idx_unit_instances_type").on(table.unitTypeId),
+  typeNameIdx: uniqueIndex("idx_unit_instances_type_name").on(
+    table.unitTypeId,
+    table.name,
+  ),
+}));
 
 export const phaseTypes = pgTable("phase_types", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -457,7 +473,9 @@ export const phaseInstances = pgTable("phase_instances", {
   siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  typeIdx: index("idx_phase_instances_type").on(table.phaseTypeId),
+}));
 
 export const designSpecifications = pgTable("design_specifications", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -487,7 +505,12 @@ export const generatedCode = pgTable("generated_code", {
   generatedAt: timestamp("generated_at", { withTimezone: true }).defaultNow().notNull(),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
   approvedBy: varchar("approved_by", { length: 255 }),
-});
+}, (table) => ({
+  sourceIdx: index("idx_generated_code_source").on(
+    table.sourceType,
+    table.sourceId,
+  ),
+}));
 
 export const dataTypeMappings = pgTable("data_type_mappings", {
   id: uuid("id").defaultRandom().primaryKey(),
@@ -517,7 +540,9 @@ export const controllers = pgTable("controllers", {
   status: varchar("status", { length: 50 }).default("offline").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
-});
+}, (table) => ({
+  vendorIdx: index("idx_controllers_vendor").on(table.vendorId),
+}));
 
 // ─── Blueprint Safe-State (#459) ─────────────────────────────────────────────
 // Watchdog & Safe-State Fallback. A blueprint's control tick has a per-tick
@@ -557,7 +582,7 @@ export const blueprintSafeStateLog = pgTable("blueprint_safe_state_log", {
   id: uuid("id").defaultRandom().primaryKey(),
   blueprintId: varchar("blueprint_id", { length: 64 }).notNull(),
   siteId: varchar("site_id", { length: 64 }).references(() => sites.id),
-  // "ENTERED" when the watchdog trips, "EXITED" when an operator resumes.
+  // ENTERED/EXIT_REQUESTED/EXITED plus compensating failure transitions.
   transition: varchar("transition", { length: 16 }).notNull(),
   // Serialized SafeStateAction that was applied.
   safeState: jsonb("safe_state").notNull(),
@@ -565,9 +590,9 @@ export const blueprintSafeStateLog = pgTable("blueprint_safe_state_log", {
   consecutiveMisses: integer("consecutive_misses"),
   // Operator who acknowledged / resumed (null for an automatic ENTERED event).
   operator: varchar("operator", { length: 255 }),
-  reason: text("reason"),
+  reason: text("reason").notNull(),
   // Hash anchored to the canonical anchor backend for this transition.
-  anchorHash: varchar("anchor_hash", { length: 255 }),
+  anchorHash: varchar("anchor_hash", { length: 255 }).notNull(),
   anchorTxHash: varchar("anchor_tx_hash", { length: 255 }),
   metadata: jsonb("metadata"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -575,6 +600,7 @@ export const blueprintSafeStateLog = pgTable("blueprint_safe_state_log", {
   blueprintIdIdx: index("idx_safe_state_log_blueprint_id").on(table.blueprintId),
   transitionIdx: index("idx_safe_state_log_transition").on(table.transition),
   createdAtIdx: index("idx_safe_state_log_created_at").on(table.createdAt),
+  anchorHashIdx: uniqueIndex("idx_safe_state_log_anchor_hash").on(table.anchorHash),
 }));
 
 export type BlueprintSafeStateLog = typeof blueprintSafeStateLog.$inferSelect;

@@ -13,20 +13,16 @@ import { fromZodError } from "zod-validation-error/v3";
 import { alarmCorrelationService } from "../services/alarm-correlation";
 import { validateRule } from "../services/alarm-correlation/rules";
 import type { CorrelationRule } from "@shared/types/alarm-correlation";
+import { requireControlPlaneAccess } from "../middleware/control-plane-auth";
 
 const router = Router();
 const engine = alarmCorrelationService.engine;
 
-// Auth middleware placeholder — same pattern as other protected routes
-function requireAuth(
-  req: import("express").Request,
-  res: import("express").Response,
-  next: import("express").NextFunction
-) {
-  // TODO: implement real auth check (JWT / session validation)
-  next();
-}
-router.use(requireAuth);
+router.use(requireControlPlaneAccess({ roles: ["operator"] }));
+const requireAlarmWrite = requireControlPlaneAccess({
+  roles: ["operator"],
+  scopes: ["alarms.write"],
+});
 
 // ── Schemas ────────────────────────────────────────────────────────────────
 
@@ -97,7 +93,7 @@ const GroupQuerySchema = z.object({
 
 // ── Alarm ingestion & lifecycle ────────────────────────────────────────────
 
-router.post("/alarms", (req, res) => {
+router.post("/alarms", requireAlarmWrite, (req, res) => {
   const parsed = IngestSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -121,12 +117,12 @@ router.post("/alarms", (req, res) => {
   res.json({ ingested: results.length, results, rejected });
 });
 
-router.post("/alarms/:alarmId/clear", (req, res) => {
+router.post("/alarms/:alarmId/clear", requireAlarmWrite, (req, res) => {
   const outcome = engine.alarmCleared(req.params.alarmId);
   res.json(outcome);
 });
 
-router.post("/alarms/:alarmId/acknowledge", (req, res) => {
+router.post("/alarms/:alarmId/acknowledge", requireAlarmWrite, (req, res) => {
   const ok = engine.alarmAcknowledged(req.params.alarmId);
   if (!ok) {
     return res.status(404).json({ error: `Alarm ${req.params.alarmId} not tracked` });
@@ -166,7 +162,7 @@ router.get("/rules", (_req, res) => {
   res.json({ rules: engine.rules.list() });
 });
 
-router.put("/rules/:ruleId", (req, res) => {
+router.put("/rules/:ruleId", requireAlarmWrite, (req, res) => {
   const parsed = RuleSchema.safeParse({ ...req.body, id: req.params.ruleId });
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -179,20 +175,20 @@ router.put("/rules/:ruleId", (req, res) => {
   res.json(engine.rules.upsert(rule));
 });
 
-router.delete("/rules/:ruleId", (req, res) => {
+router.delete("/rules/:ruleId", requireAlarmWrite, (req, res) => {
   if (!engine.rules.remove(req.params.ruleId)) {
     return res.status(404).json({ error: `Rule ${req.params.ruleId} not found` });
   }
   res.json({ removed: true });
 });
 
-router.post("/rules/:ruleId/enable", (req, res) => {
+router.post("/rules/:ruleId/enable", requireAlarmWrite, (req, res) => {
   const rule = engine.rules.setEnabled(req.params.ruleId, true);
   if (!rule) return res.status(404).json({ error: `Rule ${req.params.ruleId} not found` });
   res.json(rule);
 });
 
-router.post("/rules/:ruleId/disable", (req, res) => {
+router.post("/rules/:ruleId/disable", requireAlarmWrite, (req, res) => {
   const rule = engine.rules.setEnabled(req.params.ruleId, false);
   if (!rule) return res.status(404).json({ error: `Rule ${req.params.ruleId} not found` });
   res.json(rule);
@@ -204,7 +200,7 @@ router.get("/topology", (_req, res) => {
   res.json({ nodes: engine.topology.list() });
 });
 
-router.put("/topology", (req, res) => {
+router.put("/topology", requireAlarmWrite, (req, res) => {
   const parsed = TopologySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
@@ -217,7 +213,7 @@ router.put("/topology", (req, res) => {
   }
 });
 
-router.delete("/topology/:equipmentId", (req, res) => {
+router.delete("/topology/:equipmentId", requireAlarmWrite, (req, res) => {
   if (!engine.topology.remove(req.params.equipmentId)) {
     return res.status(404).json({ error: `Equipment ${req.params.equipmentId} not found` });
   }
@@ -230,7 +226,7 @@ router.get("/suppression-policy", (_req, res) => {
   res.json(engine.getSuppressionPolicy());
 });
 
-router.put("/suppression-policy", (req, res) => {
+router.put("/suppression-policy", requireAlarmWrite, (req, res) => {
   const parsed = SuppressionPolicySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: fromZodError(parsed.error).message });
