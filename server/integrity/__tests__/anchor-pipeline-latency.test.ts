@@ -22,7 +22,7 @@ import type { AnchorContractLike } from '../relayer';
 import type { SCADAEvent } from '../pipeline';
 import { registry } from '../../metrics/prometheus.js';
 import { metricsHandler } from '../../metrics/index.js';
-import { STAGE_SLO_MS } from '../stage-timestamps.js';
+import { LATENCY_BUCKETS_SECONDS, STAGE_SLO_MS } from '../stage-timestamps.js';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -176,12 +176,31 @@ describe('AnchorPipeline emits control-loop latency telemetry (#460)', () => {
     expect(sign.withinSlo).toBe(false);
 
     const scrape = await scrapeMetricsEndpoint();
-    // The observation lands above the 0.1s bucket and at/below the 0.25s bucket.
+    // The observation lands above the 0.1s bucket: the 200ms injection alone
+    // guarantees that, so this boundary can be named outright.
     expect(scrape).toContain(
       'scada_control_loop_stage_latency_seconds_bucket{stage="sign",source="test-slowsign",le="0.1"} 0',
     );
+    // ...and it is counted in the first bucket at or above the duration that was
+    // actually measured. The boundary is derived from that measurement rather
+    // than hard-coded, because `sleep(200)` plus a real RSA signature has no
+    // upper bound: on a loaded machine the stage has been observed at 259ms,
+    // which put it in the 0.5s bucket and made a fixed `le="0.25"` assertion
+    // fail even though the histogram had shifted exactly as intended.
+    const measuredSeconds = sign.durationMs / 1000;
+    const upper = LATENCY_BUCKETS_SECONDS.find((b) => measuredSeconds <= b);
+    const lower = [...LATENCY_BUCKETS_SECONDS].reverse().find((b) => b < measuredSeconds);
+    expect(upper, `sign took ${sign.durationMs}ms, off the top of the histogram`).toBeDefined();
+    expect(lower).toBeDefined();
     expect(scrape).toContain(
-      'scada_control_loop_stage_latency_seconds_bucket{stage="sign",source="test-slowsign",le="0.25"} 1',
+      `scada_control_loop_stage_latency_seconds_bucket{stage="sign",source="test-slowsign",le="${lower}"} 0`,
+    );
+    expect(scrape).toContain(
+      `scada_control_loop_stage_latency_seconds_bucket{stage="sign",source="test-slowsign",le="${upper}"} 1`,
+    );
+    // The exposition agrees with the measurement it came from.
+    expect(scrape).toContain(
+      `scada_control_loop_stage_latency_seconds_sum{stage="sign",source="test-slowsign"} ${measuredSeconds}`,
     );
     // The gauge the >5min budget alert is written against actually reads 0.
     expect(scrape).toContain(

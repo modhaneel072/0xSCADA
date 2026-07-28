@@ -245,8 +245,12 @@ export function computeMeasurement(
 /**
  * Histogram bucket boundaries in SECONDS (Prometheus convention). Covers
  * sub-millisecond local work through multi-block on-chain confirmations.
+ *
+ * Exported so callers that reason about the exposition (tests asserting which
+ * `le` bucket an observation lands in) read the real boundaries instead of
+ * restating them.
  */
-const LATENCY_BUCKETS_SECONDS = [
+export const LATENCY_BUCKETS_SECONDS = [
   0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60,
 ] as const;
 
