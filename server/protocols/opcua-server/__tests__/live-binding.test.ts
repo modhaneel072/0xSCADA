@@ -13,17 +13,26 @@
  * session, accepts a valid username/password from the injected user store, and
  * refuses a bad password.
  *
+ * A third suite covers the profile operators actually deploy — the shipped
+ * Basic256Sha256 Sign&Encrypt default, with the client certificate trusted
+ * through the real PKI trust list — and asserts the loopback bind is not
+ * reachable from a routable interface. The first two suites both run with
+ * `securityPolicy: "None"`, so without it the default endpoint had no wire
+ * coverage at all.
+ *
  * Nothing here is mocked on the node-opcua side. If the package cannot be
  * loaded the whole suite is skipped with a printed reason rather than asserting
  * against a stand-in — see `isNodeOpcuaAvailable()`.
  */
 import { describe, test, expect, beforeAll, afterAll } from "vitest";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { scryptSync } from "node:crypto";
 import { loadOpcuaServerConfig } from "../config";
 import { isNodeOpcuaAvailable } from "../node-opcua-api";
+import { resolveCertificatePaths } from "../security";
 import { OxScadaOpcuaServer, type TagDataSource } from "../index";
 import type { SourceSite, SourceTag, TagSample } from "../types";
 import type { AuthUserRecord, UserLookup } from "../user-auth";
@@ -63,17 +72,40 @@ interface UaSession {
   close(): Promise<void>;
 }
 
+/** Subset of a UA EndpointDescription this test asserts on. */
+interface UaEndpointDescription {
+  endpointUrl: string;
+  securityPolicyUri: string;
+  securityMode: number;
+  userIdentityTokens: { tokenType: number; policyId: string }[] | null;
+}
+
 interface UaClient {
   connect(endpointUrl: string): Promise<void>;
   createSession(userIdentity?: Record<string, unknown>): Promise<UaSession>;
+  getEndpoints(): Promise<UaEndpointDescription[]>;
   disconnect(): Promise<void>;
   getCertificate(): Buffer;
+}
+
+/** Parameters node-opcua's PKI layer accepts for self-signed generation. */
+interface SelfSignedCertificateParams {
+  applicationUri: string;
+  dns: string[];
+  subject: string;
+  startDate: Date;
+  validity: number;
+  outputFile: string;
 }
 
 interface UaCertificateManagerLike {
   initialize(): Promise<void>;
   dispose(): Promise<void>;
+  createSelfSignedCertificate(
+    params: SelfSignedCertificateParams,
+  ): Promise<void>;
   readonly privateKey: string;
+  readonly ownCertFolder: string;
 }
 
 interface UaClientApi {
@@ -81,10 +113,13 @@ interface UaClientApi {
   OPCUACertificateManager: new (options: {
     rootFolder: string;
     automaticallyAcceptUnknownCertificate: boolean;
+    disableFileWatchers?: boolean;
   }) => UaCertificateManagerLike;
   AttributeIds: Record<string, number>;
   TimestampsToReturn: Record<string, number>;
   UserTokenType: Record<string, number>;
+  MessageSecurityMode: Record<string, number>;
+  SecurityPolicy: Record<string, string>;
 }
 
 async function loadClientApi(): Promise<UaClientApi> {
@@ -439,5 +474,253 @@ describe.skipIf(!nodeOpcuaAvailable)(
         ),
       ).rejects.toThrow(/BadUserAccessDenied/);
     }, 60_000);
+  },
+);
+
+// ─── The shipped production profile, on the wire ─────────────────────────────
+
+/** First non-internal IPv4 address on this host, if there is one. */
+function routableIPv4(): string | null {
+  for (const addresses of Object.values(os.networkInterfaces())) {
+    for (const address of addresses ?? []) {
+      if (address.family === "IPv4" && !address.internal) return address.address;
+    }
+  }
+  return null;
+}
+
+/** Raw TCP reachability probe; resolves to a short outcome string. */
+function probeTcp(
+  host: string,
+  port: number,
+  timeoutMs = 4_000,
+): Promise<string> {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    const finish = (outcome: string): void => {
+      socket.destroy();
+      resolve(outcome);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish("connected"));
+    socket.once("timeout", () => finish("timeout"));
+    socket.once("error", (err: NodeJS.ErrnoException) =>
+      finish(`error:${err.code ?? err.message}`),
+    );
+    socket.connect(port, host);
+  });
+}
+
+/**
+ * Everything above drives the server with `securityPolicy: "None"`, which is
+ * loopback/dev-only. The *shipped* profile — Basic256Sha256 Sign&Encrypt with a
+ * managed PKI trust list and no anonymous access — had no wire coverage at all,
+ * so the endpoint operators actually deploy was the one nothing exercised.
+ *
+ * This suite starts the server with the shipped defaults (no securityPolicy,
+ * allowAnonymous or trustUnknownClientCertificates override) under
+ * `env: "production"`, and connects a real client whose certificate was placed
+ * in `<pkiFolder>/trusted/certs` *before* start — i.e. through the real trust
+ * list, not the loopback auto-accept shortcut.
+ */
+describe.skipIf(!nodeOpcuaAvailable)(
+  "OPC-UA server — shipped Basic256Sha256 profile over the PKI trust list",
+  () => {
+    let pkiFolder: string;
+    let clientPki: string;
+    let clientCerts: UaCertificateManagerLike;
+    let clientCertFile: string;
+    let server: OxScadaOpcuaServer;
+    let dataSource: InMemoryTagDataSource;
+    let api: UaClientApi;
+
+    beforeAll(async () => {
+      api = await loadClientApi();
+      pkiFolder = fs.mkdtempSync(path.join(os.tmpdir(), "oxscada-opcua-tls-"));
+      clientPki = fs.mkdtempSync(path.join(os.tmpdir(), "oxscada-opcua-tlsc-"));
+
+      // Provision the client certificate and trust it BEFORE the server starts:
+      // node-opcua reads the trust list at initialize() time.
+      // Auto-accept here is the *client's* trust decision about the server's
+      // self-signed certificate; it says nothing about the server posture under
+      // test, which keeps `trustUnknownClientCertificates: false`.
+      clientCerts = new api.OPCUACertificateManager({
+        rootFolder: clientPki,
+        automaticallyAcceptUnknownCertificate: true,
+        disableFileWatchers: true,
+      });
+      await clientCerts.initialize();
+      clientCertFile = path.join(clientCerts.ownCertFolder, "client_cert.pem");
+      await clientCerts.createSelfSignedCertificate({
+        applicationUri: "urn:0xscada:live-test-client",
+        dns: ["localhost"],
+        subject: "/CN=0xSCADA live test client",
+        startDate: new Date(),
+        validity: 30,
+        outputFile: clientCertFile,
+      });
+      const trustedCerts = path.join(pkiFolder, "trusted", "certs");
+      fs.mkdirSync(trustedCerts, { recursive: true });
+      fs.copyFileSync(clientCertFile, path.join(trustedCerts, "client.pem"));
+
+      dataSource = new InMemoryTagDataSource();
+      dataSource.push({
+        tagId: "PT-101.PV",
+        value: 12.5,
+        dataType: "number",
+        quality: "good",
+        timestamp: new Date().toISOString(),
+      });
+
+      // No security overrides: this is exactly what an operator gets from
+      // `OPCUA_SERVER_ENABLED=true` with nothing else set.
+      server = makeServer(dataSource, pkiFolder, { env: "production" });
+      await server.start();
+    }, 180_000);
+
+    afterAll(async () => {
+      await server?.stop();
+      await clientCerts?.dispose();
+      if (pkiFolder) fs.rmSync(pkiFolder, { recursive: true, force: true });
+      if (clientPki) fs.rmSync(clientPki, { recursive: true, force: true });
+    }, 60_000);
+
+    function secureClient(): UaClient {
+      return api.OPCUAClient.create({
+        endpointMustExist: false,
+        connectionStrategy: { maxRetry: 0 },
+        securityMode: api.MessageSecurityMode.SignAndEncrypt,
+        securityPolicy: api.SecurityPolicy.Basic256Sha256,
+        clientCertificateManager: clientCerts,
+        certificateFile: clientCertFile,
+        privateKeyFile: clientCerts.privateKey,
+      });
+    }
+
+    test("the shipped defaults really are the secure ones", () => {
+      expect(server.configuration.securityPolicy).toBe("Basic256Sha256");
+      expect(server.configuration.allowAnonymous).toBe(false);
+      expect(server.configuration.trustUnknownClientCertificates).toBe(false);
+      expect(server.configuration.host).toBe("127.0.0.1");
+    });
+
+    test("generates server key material whose SAN URI matches the ApplicationUri", async () => {
+      // A UA client validates that the server certificate's subjectAltName URI
+      // equals the ApplicationUri in the EndpointDescription; a mismatch is
+      // BadCertificateUriInvalid on any conformant stack.
+      const { certificateFile, privateKeyFile } =
+        resolveCertificatePaths(pkiFolder);
+      expect(fs.existsSync(certificateFile)).toBe(true);
+      expect(fs.existsSync(privateKeyFile)).toBe(true);
+
+      const { X509Certificate } = await import("node:crypto");
+      const certificate = new X509Certificate(fs.readFileSync(certificateFile));
+      expect(
+        certificate.publicKey.asymmetricKeyDetails?.modulusLength ?? 0,
+      ).toBeGreaterThanOrEqual(2048);
+      expect(certificate.subjectAltName ?? "").toContain(
+        `URI:${server.configuration.applicationUri}`,
+      );
+    }, 30_000);
+
+    test("advertises only Basic256Sha256/SignAndEncrypt and no anonymous token", async () => {
+      const client = secureClient();
+      await client.connect(server.endpoint);
+      try {
+        const endpoints = await client.getEndpoints();
+        expect(endpoints.length).toBeGreaterThan(0);
+        for (const endpoint of endpoints) {
+          expect(endpoint.securityPolicyUri).toBe(
+            api.SecurityPolicy.Basic256Sha256,
+          );
+          expect(endpoint.securityMode).toBe(
+            api.MessageSecurityMode.SignAndEncrypt,
+          );
+        }
+        const tokenTypes = endpoints.flatMap((endpoint) =>
+          (endpoint.userIdentityTokens ?? []).map((token) => token.tokenType),
+        );
+        expect(tokenTypes).not.toContain(api.UserTokenType.Anonymous);
+        expect(tokenTypes).toContain(api.UserTokenType.UserName);
+      } finally {
+        await client.disconnect();
+      }
+    }, 60_000);
+
+    test("a trusted client reads a tag over Sign&Encrypt with a UserName token", async () => {
+      const client = secureClient();
+      await client.connect(server.endpoint);
+      try {
+        const session = await client.createSession({
+          type: api.UserTokenType.UserName,
+          userName: OPERATOR.username,
+          password: PASSWORD,
+        });
+        const namespaceIndex = server.addressSpacePlan!.namespaceIndex;
+        const read = await session.readVariableValue(
+          `ns=${namespaceIndex};${TAG_NODE_ID_SUFFIX}`,
+        );
+        expect(read.statusCode.name).toBe("Good");
+        expect(read.value.value).toBeCloseTo(12.5, 6);
+        await session.close();
+      } finally {
+        await client.disconnect();
+      }
+    }, 60_000);
+
+    test("refuses an anonymous session on the secure endpoint", async () => {
+      const client = secureClient();
+      await client.connect(server.endpoint);
+      try {
+        await expect(client.createSession()).rejects.toThrow(
+          /ANONYMOUS user token policy/i,
+        );
+      } finally {
+        await client.disconnect();
+      }
+    }, 60_000);
+
+    test("refuses a client certificate that is not in the trust list", async () => {
+      const strangerPki = fs.mkdtempSync(
+        path.join(os.tmpdir(), "oxscada-opcua-stranger-"),
+      );
+      const strangerCerts = new api.OPCUACertificateManager({
+        rootFolder: strangerPki,
+        automaticallyAcceptUnknownCertificate: true,
+        disableFileWatchers: true,
+      });
+      await strangerCerts.initialize();
+      const client = api.OPCUAClient.create({
+        endpointMustExist: false,
+        connectionStrategy: { maxRetry: 0 },
+        securityMode: api.MessageSecurityMode.SignAndEncrypt,
+        securityPolicy: api.SecurityPolicy.Basic256Sha256,
+        clientCertificateManager: strangerCerts,
+      });
+      try {
+        await expect(client.connect(server.endpoint)).rejects.toThrow();
+      } finally {
+        await client.disconnect().catch(() => undefined);
+        await strangerCerts.dispose();
+        fs.rmSync(strangerPki, { recursive: true, force: true });
+      }
+    }, 60_000);
+
+    test("the loopback bind is not reachable from a routable interface", async () => {
+      const port = server.boundPort!;
+      expect(await probeTcp("127.0.0.1", port)).toBe("connected");
+
+      const routable = routableIPv4();
+      if (routable === null) {
+        // Truthful skip: with no non-internal IPv4 address there is nothing to
+        // prove the negative against. Never assert a pass we did not observe.
+        console.warn(
+          "[#461] no non-internal IPv4 interface on this host; " +
+            "skipping the routable-interface reachability probe",
+        );
+        return;
+      }
+      expect(await probeTcp(routable, port)).not.toBe("connected");
+    }, 30_000);
   },
 );

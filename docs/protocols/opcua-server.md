@@ -154,8 +154,11 @@ Objects/                       (UA NS0, i=85)
 - NodeIds are **string** identifiers in the application namespace, built
   deterministically from `siteId` / `tagId` (slashes/percents are escaped).
   `<i>` is the index the address space actually assigns to the application
-  namespace — node-opcua's own server namespace already occupies index 1, so
-  this is normally 2. Read it from `server.addressSpacePlan.namespaceIndex`.
+  namespace, which is why the NodeIds are built after `registerNamespace()`
+  rather than against a hardcoded number. **Always read it from
+  `server.addressSpacePlan.namespaceIndex`** (UA clients should resolve it by
+  URI — `get_namespace_index("urn:0xscada:server")`). Measured value on the
+  installed node-opcua 2.175.2 (the dependency is declared `^2.130.0`): `1`.
 - Data-type mapping: `boolean → Boolean`, `number → Double`, `string → String`,
   `object`/`array` → JSON-encoded String (`TODO(#461)`: synthesise proper UA
   structured/array types).
@@ -197,71 +200,115 @@ Unit tests (`npx vitest run server/protocols/opcua-server`):
   valid username/password from the user store is accepted, and a bad password or
   unknown user gets `BadUserAccessDenied`.
 
+  A third suite in the same file covers the **shipped** profile, which the two
+  above do not: it starts the server with no security overrides at all
+  (`Basic256Sha256` / Sign&Encrypt, `allowAnonymous: false`,
+  `trustUnknownClientCertificates: false`) under `env: "production"`, places the
+  client certificate in `<pkiFolder>/trusted/certs` *before* start so the
+  handshake goes through the real trust list, and asserts: the generated server
+  certificate is RSA ≥2048 with a subjectAltName URI equal to the
+  ApplicationUri; only a `Basic256Sha256`/`SignAndEncrypt` endpoint is
+  advertised and it carries no Anonymous token; a trusted client reads a tag
+  over Sign&Encrypt with a UserName token; an anonymous session is refused; an
+  untrusted client certificate is refused; and the loopback bind is **not**
+  reachable over this host's routable IPv4 address (skipped with a printed
+  reason if the host has none).
+
   If `node-opcua` cannot be loaded the live suite **skips with a printed
   reason** rather than asserting against a stand-in.
 
-## Interoperability check with opcua-asyncio
+## Conformance smoke test with opcua-asyncio
 
-The vitest suite above covers the binding layer with node-opcua on both ends.
-The following manual procedure additionally checks a *third-party* stack, which
-is what actually demonstrates UA interoperability. It has **not** been executed
-in CI (no Python toolchain there).
+The vitest suite above drives node-opcua on *both* ends, which cannot
+demonstrate interoperability with an independent stack. The third-party check is
+a real, runnable client script:
+
+    server/protocols/opcua-server/__tests__/opcua_asyncio_smoke.py
+
+It is deliberately **not** wired into `npx vitest run`: CI has no Python
+toolchain, so it would either skip silently or break the build on machines
+without `asyncua`. Run it explicitly:
 
 ```bash
 pip install asyncua
-DATABASE_URL=…  OPCUA_SERVER_ENABLED=true \
-OPCUA_SERVER_SECURITY_POLICY=None NODE_ENV=development npm run dev
-# Endpoint: opc.tcp://127.0.0.1:4840/0xscada
+DATABASE_URL=…  OPCUA_SERVER_ENABLED=true npm run start
+# then, against the endpoint the server logged:
+python server/protocols/opcua-server/__tests__/opcua_asyncio_smoke.py \
+  --endpoint opc.tcp://127.0.0.1:4840/0xscada \
+  --user ua-operator --password '…' \
+  --security 'Basic256Sha256,SignAndEncrypt,client_cert.pem,client_key.pem'
 ```
 
-```python
-import asyncio, time
-from asyncua import Client
+The client certificate must be in `<pkiFolder>/trusted/certs/` — the server does
+not auto-accept unknown client certificates. Drop `--security` only against a
+loopback `OPCUA_SERVER_SECURITY_POLICY=None` deployment. A second mode,
+`--expect-anonymous-refused`, asserts the shipped no-anonymous posture and
+deliberately scores a transport-level failure as *inconclusive* rather than as a
+pass.
 
-ENDPOINT = "opc.tcp://127.0.0.1:4840/0xscada"
+It checks: UserName session; namespace resolved **by URI**; `Objects/Sites` with
+one folder per site and one variable per tag; every variable reads with a good
+StatusCode and a source timestamp; a subscription delivers a
+DataChangeNotification within `--max-latency-ms` (default 200 ms, the issue's
+bound); and writes are refused.
 
-class SubHandler:
-    def __init__(self):
-        self.latencies = []
-    def datachange_notification(self, node, val, data):
-        src = data.monitored_item.Value.SourceTimestamp
-        if src:
-            self.latencies.append((time.time() - src.timestamp()) * 1000)
-        print("change", node, val)
+### Recorded run
 
-async def main():
-    client = Client(url=ENDPOINT)
-    # Anonymous is refused by default — supply a real user from the `users` table.
-    client.set_user("ua-operator")
-    client.set_password("…")
-    async with client:
-        ns = await client.get_namespace_index("urn:0xscada:server")
-        sites = await client.nodes.objects.get_child([f"{ns}:Sites"])
-        for site in await sites.get_children():
-            print("site folder:", await site.read_browse_name())
-            for tag in await site.get_children():
-                print("  tag:", await tag.read_browse_name(), "=", await tag.read_value())
+Executed 2026-07-28 via `asyncua-harness.ts` on `127.0.0.1:0`, asyncua 2.0.1 /
+CPython 3.13.14, Windows 11, with the fixture publishing a new value every
+150 ms. **Caveat:** the address space came from an in-memory `TagDataSource`
+fixture, not a live `sites` / `historian_data` database — this exercises the UA
+surface, not the Drizzle queries in `runtime.ts`.
 
-        handler = SubHandler()
-        sub = await client.create_subscription(50, handler)
-        first_site = (await sites.get_children())[0]
-        first_tag = (await first_site.get_children())[0]
-        await sub.subscribe_data_change(first_tag)
-        await asyncio.sleep(5)
-        assert handler.latencies, "no DataChangeNotification received"
-        print(f"worst latency: {max(handler.latencies):.1f} ms")
-        await sub.delete()
+Functional results, both on `None`/`None` and on
+`Basic256Sha256`/`SignAndEncrypt` (client certificate trusted through the PKI
+trust list), were identical and passed every time:
 
-asyncio.run(main())
-```
+- UserName session established; namespace resolved by URI to index `1`;
+  `Objects/Sites` → one `Refinery` folder → two variables;
+- both variables read `Good` with a source timestamp;
+- 16–38 `DataChangeNotification`s per run;
+- writes refused with `BadNotWritable`;
+- anonymous refused with `BadIdentityTokenInvalid`.
 
-For the secure profile, drop `OPCUA_SERVER_SECURITY_POLICY` (Basic256Sha256 is
-the default), point the client at the generated server certificate under
-`pkiFolder`, and call `client.set_security(...)` with
-`Basic256Sha256_SignAndEncrypt`.
+**The 200 ms latency bound in the issue is met at the median but not at the
+tail.** Worst-case source-timestamp → client-arrival latency across 10 runs:
+
+| Requested publishing interval | Runs | Worst-case latencies (ms) |
+|---|---|---|
+| 50 ms | 8 | 125.5, 145.1, 173.4, 188.6, 191.5, 232.9, 237.7, 398.1 |
+| 20 ms | 2 | 174.7, 214.8 |
+
+4 of 10 runs exceeded 200 ms. Dropping the publishing interval from 50 ms to
+20 ms did not remove the tail, so it is not simply publish-cycle quantisation;
+the residual jitter is in the sampling/publish path (each UA variable carries an
+async `refreshFunc`, so monitored items are polled rather than driven purely by
+`setValueFromSource`) plus host scheduling. Treat 200 ms as a typical figure on
+a developer workstation, not a guarantee — see "Known gaps".
 
 ## Known gaps
 
+- **No latency guarantee.** The 200 ms update bound from #461 is met at the
+  median but not at the tail: 4 of 10 measured opcua-asyncio runs exceeded it
+  (worst 398 ms), and lowering the publishing interval did not remove the tail.
+  Nothing in the server bounds, measures or reports notification latency, so
+  there is currently no way to detect a regression here. Characterising and
+  bounding it is unfinished work.
+- **Reads are served from the live cache only, with no historian backfill.**
+  `StorageTagDataSource.readTag()` answers from an in-memory latest-value map
+  that is populated *exclusively* by `tagStreamServer.onTagUpdate(...)`. Between
+  server start and the first update for a given tag, a UA read of that variable
+  returns `StatusCodes.Bad` with a zero/empty value — even though the tag exists
+  in the address space precisely because `historian_data` has rows for it. A
+  restart therefore blanks every variable until its next scan. Seeding the cache
+  with the newest `historian_data` row per tag at startup would close this.
+- **No certificate-generation helper of our own.** `resolveCertificatePaths()`
+  only *locates* the files; the material itself is provisioned by node-opcua's
+  `OPCUACertificateManager` on first start. Verified as RSA-2048, ~10-year
+  validity, subjectAltName URI equal to the ApplicationUri (so UA clients accept
+  it) — but the subject DN carries node-opcua's vendor default
+  (`C=FR L=Orleans O=Sterfive CN=<serverName>@<host>`), and there is no CSR path
+  for getting CA-issued material.
 - **No UA writes.** All variables are read-only. Wiring writes means routing
   them through the same authorisation the other actuating routes use
   (`requireControlPlaneAccess`) plus an audit trail — `TODO(#461)`.
